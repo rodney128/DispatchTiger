@@ -1,0 +1,56 @@
+<UserControl x:Class="DispatchTiger.Views.MonthView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:local="clr-namespace:DispatchTiger.Views"
+             mc:Ignorable="d"
+             d:DesignHeight="600" d:DesignWidth="1000">
+    <Grid Background="{StaticResource DarkBackgroundBrush}" VerticalAlignment="Stretch" HorizontalAlignment="Stretch">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- Month Header -->
+        <TextBlock Grid.Row="0" Name="MonthHeader" Text="Month View" Style="{StaticResource PanelHeader}" Padding="15,10" FontSize="16"/>
+
+        <!-- Calendar Grid -->
+        <Grid Grid.Row="1" Name="DispatchContentContainer" Background="{StaticResource PanelBackgroundBrush}" RenderTransformOrigin="0.5,0.5">
+            <Grid.RenderTransform>
+                <ScaleTransform x:Name="DispatchContentScaleTransform" ScaleX="1" ScaleY="1"/>
+            </Grid.RenderTransform>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+
+            <!-- Day of Week Headers (Sun-Sat) -->
+            <Grid Grid.Row="0" Background="#202020" Height="40">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Column="0" Text="Sunday" FontWeight="Bold" Foreground="{StaticResource AccentOrangeBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                <TextBlock Grid.Column="1" Text="Monday" FontWeight="Bold" Foreground="{StaticResource LightTextBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                <TextBlock Grid.Column="2" Text="Tuesday" FontWeight="Bold" Foreground="{StaticResource LightTextBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                <TextBlock Grid.Column="3" Text="Wednesday" FontWeight="Bold" Foreground="{StaticResource LightTextBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                <TextBlock Grid.Column="4" Text="Thursday" FontWeight="Bold" Foreground="{StaticResource LightTextBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                <TextBlock Grid.Column="5" Text="Friday" FontWeight="Bold" Foreground="{StaticResource LightTextBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                <TextBlock Grid.Column="6" Text="Saturday" FontWeight="Bold" Foreground="{StaticResource AccentOrangeBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Grid>
+
+            <!-- Calendar Days Grid -->
+            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Visible" HorizontalScrollBarVisibility="Disabled">
+                <Grid Name="CalendarGrid" Background="{StaticResource PanelBackgroundBrush}">
+                </Grid>
+            </ScrollViewer>
+        </Grid>
+    </Grid>
+</UserControl>
