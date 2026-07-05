@@ -403,22 +403,23 @@ namespace DispatchTiger.Views
             AddSummaryRun(CandidateJobSummaryPanel, "Truck candidates for: ", Color.FromRgb(136, 136, 136));
             AddSummaryRun(CandidateJobSummaryPanel, job.Description, Color.FromRgb(242, 140, 40), bold: true);
 
-            if (!string.IsNullOrEmpty(job.PickupAddress))
+            // Show raw address only when no location is linked (mirrors job-card fallback)
+            if (job.PickupLocation == null && !string.IsNullOrEmpty(job.PickupAddress))
             {
                 AddSummaryRun(CandidateJobSummaryPanel, "  ·  Pickup: ", Color.FromRgb(80, 80, 80));
                 var pickupText = job.PickupAddress;
                 if (job.PickupWindowStart.HasValue && job.PickupWindowEnd.HasValue)
-                    pickupText += $" ({job.PickupWindowStart.Value:h:mm tt}–{job.PickupWindowEnd.Value:h:mm tt})";
+                    pickupText += $" ({job.PickupWindowStart.Value:h:mm tt}\u2013{job.PickupWindowEnd.Value:h:mm tt})";
                 else if (job.PickupWindowStart.HasValue)
                     pickupText += $" (from {job.PickupWindowStart.Value:h:mm tt})";
                 AddSummaryRun(CandidateJobSummaryPanel, pickupText, Color.FromRgb(187, 187, 187));
             }
-            if (!string.IsNullOrEmpty(job.DeliveryAddress))
+            if (job.DeliveryLocation == null && !string.IsNullOrEmpty(job.DeliveryAddress))
             {
                 AddSummaryRun(CandidateJobSummaryPanel, "  ·  Delivery: ", Color.FromRgb(80, 80, 80));
                 var deliveryText = job.DeliveryAddress;
                 if (job.DeliveryWindowStart.HasValue && job.DeliveryWindowEnd.HasValue)
-                    deliveryText += $" ({job.DeliveryWindowStart.Value:h:mm tt}–{job.DeliveryWindowEnd.Value:h:mm tt})";
+                    deliveryText += $" ({job.DeliveryWindowStart.Value:h:mm tt}\u2013{job.DeliveryWindowEnd.Value:h:mm tt})";
                 else if (job.DeliveryWindowStart.HasValue)
                     deliveryText += $" (from {job.DeliveryWindowStart.Value:h:mm tt})";
                 AddSummaryRun(CandidateJobSummaryPanel, deliveryText, Color.FromRgb(187, 187, 187));
@@ -430,6 +431,35 @@ namespace DispatchTiger.Views
                     sched += $" @{job.ScheduledTime.Value:D2}:00";
                 AddSummaryRun(CandidateJobSummaryPanel, "  ·  Sched: ", Color.FromRgb(80, 80, 80));
                 AddSummaryRun(CandidateJobSummaryPanel, sched, Color.FromRgb(187, 187, 187));
+            }
+
+            // Company references — customer, then pickup/delivery with location name when available
+            if (job.Customer != null)
+            {
+                AddSummaryRun(CandidateJobSummaryPanel, "  ·  Cust: ", Color.FromRgb(80, 80, 80));
+                AddSummaryRun(CandidateJobSummaryPanel, job.Customer.Name, Color.FromRgb(187, 187, 187));
+            }
+            if (job.Shipper != null || job.PickupLocation != null)
+            {
+                AddSummaryRun(CandidateJobSummaryPanel, "  ·  Pickup: ", Color.FromRgb(80, 80, 80));
+                if (job.Shipper != null)
+                    AddSummaryRun(CandidateJobSummaryPanel, job.Shipper.Name, Color.FromRgb(187, 187, 187));
+                if (job.PickupLocation != null)
+                {
+                    AddSummaryRun(CandidateJobSummaryPanel, " \u2014 ", Color.FromRgb(80, 80, 80));
+                    AddSummaryRun(CandidateJobSummaryPanel, job.PickupLocation.Name, Color.FromRgb(187, 187, 187));
+                }
+            }
+            if (job.Receiver != null || job.DeliveryLocation != null)
+            {
+                AddSummaryRun(CandidateJobSummaryPanel, "  ·  Delivery: ", Color.FromRgb(80, 80, 80));
+                if (job.Receiver != null)
+                    AddSummaryRun(CandidateJobSummaryPanel, job.Receiver.Name, Color.FromRgb(187, 187, 187));
+                if (job.DeliveryLocation != null)
+                {
+                    AddSummaryRun(CandidateJobSummaryPanel, " \u2014 ", Color.FromRgb(80, 80, 80));
+                    AddSummaryRun(CandidateJobSummaryPanel, job.DeliveryLocation.Name, Color.FromRgb(187, 187, 187));
+                }
             }
 
             // Selection status — appended to the summary line

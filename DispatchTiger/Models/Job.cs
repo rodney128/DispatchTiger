@@ -32,6 +32,23 @@ namespace DispatchTiger.Models
         /// <summary>Truck/equipment type required for this job, e.g. Flatbed, Box Truck, Reefer (null = no specific requirement).</summary>
         public string? RequiredEquipment { get; set; }
 
+        // Company references — additive; existing address string fields are unchanged
+        public int?     CustomerId { get; set; }
+        public Company? Customer   { get; set; }
+
+        public int?     ShipperId  { get; set; }
+        public Company? Shipper    { get; set; }
+
+        public int?     ReceiverId { get; set; }
+        public Company? Receiver   { get; set; }
+
+        // Location references — when set, PickupAddress/DeliveryAddress are overridden from the location
+        public int?             PickupLocationId  { get; set; }
+        public CompanyLocation? PickupLocation    { get; set; }
+
+        public int?             DeliveryLocationId { get; set; }
+        public CompanyLocation? DeliveryLocation   { get; set; }
+
         public override string ToString() => $"Job {Id}: {Description}";
     }
 }

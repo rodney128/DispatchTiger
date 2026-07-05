@@ -30,10 +30,12 @@ namespace DispatchTiger.ViewModels
         private record UndoRecord(Job Job, Assignment AddedAssignment);
         private UndoRecord? _undoRecord;
 
-        public ObservableCollection<Job> UnassignedJobs { get; }
-        public ObservableCollection<Truck> AvailableTrucks { get; }
-        public ObservableCollection<Job> AllJobs { get; }
-        public ObservableCollection<Assignment> Assignments { get; }
+        public ObservableCollection<Job>             UnassignedJobs    { get; }
+        public ObservableCollection<Truck>            AvailableTrucks   { get; }
+        public ObservableCollection<Job>              AllJobs           { get; }
+        public ObservableCollection<Assignment>       Assignments       { get; }
+        public ObservableCollection<Company>          Companies         { get; }
+        public ObservableCollection<CompanyLocation>  CompanyLocations  { get; }
 
         public Job? SelectedJob
         {
@@ -73,10 +75,12 @@ namespace DispatchTiger.ViewModels
 
         public MainViewModel()
         {
-            UnassignedJobs = new ObservableCollection<Job>();
-            AvailableTrucks = new ObservableCollection<Truck>();
-            AllJobs = new ObservableCollection<Job>();
-            Assignments = new ObservableCollection<Assignment>();
+            UnassignedJobs   = new ObservableCollection<Job>();
+            AvailableTrucks  = new ObservableCollection<Truck>();
+            AllJobs          = new ObservableCollection<Job>();
+            Assignments      = new ObservableCollection<Assignment>();
+            Companies        = new ObservableCollection<Company>();
+            CompanyLocations = new ObservableCollection<CompanyLocation>();
 
             UnassignedJobs.CollectionChanged += (_, __) => { OnPropertyChanged(nameof(UnassignedCount)); OnPropertyChanged(nameof(AssignedCount)); };
             AllJobs.CollectionChanged += (_, __) => OnPropertyChanged(nameof(AssignedCount));
@@ -93,9 +97,15 @@ namespace DispatchTiger.ViewModels
         /// </summary>
         private void LoadSeedData()
         {
-            var (drivers, trucks, jobs, assignments) = SeedDataService.GenerateAllData();
+            var (drivers, trucks, jobs, assignments, companies, locations) = SeedDataService.GenerateAllData();
 
             // Populate collections
+            foreach (var company in companies)
+                Companies.Add(company);
+
+            foreach (var location in locations)
+                CompanyLocations.Add(location);
+
             foreach (var truck in trucks)
             {
                 AvailableTrucks.Add(truck);

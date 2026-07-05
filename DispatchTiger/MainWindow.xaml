@@ -13,7 +13,9 @@
         WindowStartupLocation="CenterScreen"
         WindowState="Maximized">
     <Window.Resources>
-        <conv:NullToCollapsedConverter x:Key="NullToCollapsed"/>
+        <conv:NullToCollapsedConverter  x:Key="NullToCollapsed"/>
+        <conv:NullToVisibilityConverter x:Key="NullToVisibilityConverter"/>
+        <conv:EqualityConverter         x:Key="EqualityConverter"/>
     </Window.Resources>
     <Grid>
         <Grid.RowDefinitions>
@@ -74,9 +76,14 @@
                                         <Border.Style>
                                             <Style TargetType="Border" BasedOn="{StaticResource JobCardBorder}">
                                                 <Style.Triggers>
-                                                    <DataTrigger Binding="{Binding DataContext.SelectedJob,
-                                                                     RelativeSource={RelativeSource AncestorType=Window}}"
-                                                                 Value="{Binding}">
+                                                    <DataTrigger Value="True">
+                                                        <DataTrigger.Binding>
+                                                            <MultiBinding Converter="{StaticResource EqualityConverter}">
+                                                                <Binding Path="DataContext.SelectedJob"
+                                                                         RelativeSource="{RelativeSource AncestorType=Window}"/>
+                                                                <Binding/>
+                                                            </MultiBinding>
+                                                        </DataTrigger.Binding>
                                                         <Setter Property="Background"      Value="#303030"/>
                                                         <Setter Property="BorderBrush"     Value="#F28C28"/>
                                                         <Setter Property="BorderThickness" Value="3,1,1,1"/>
@@ -86,14 +93,32 @@
                                         </Border.Style>
                                         <StackPanel>
                                             <TextBlock Text="{Binding Description}" Style="{StaticResource JobDescription}"/>
+                                            <!-- Pickup: ShipperName — LocationName (shown when PickupLocation is set) -->
+                                            <TextBlock Style="{StaticResource JobSubtext}" FontSize="11"
+                                                       Visibility="{Binding PickupLocation, Converter={StaticResource NullToCollapsed}}">
+                                                <Run Text="Pickup: "/><Run Text="{Binding Shipper.Name, Mode=OneWay}"/>
+                                                <Run Text=" — "/><Run Text="{Binding PickupLocation.Name, Mode=OneWay}"/>
+                                                <Run Text="{Binding PickupWindowStart, Mode=OneWay, StringFormat=' ({0:h:mm tt}'}"/>
+                                                <Run Text="{Binding PickupWindowEnd,   Mode=OneWay, StringFormat='–{0:h:mm tt})'}"/>
+                                            </TextBlock>
+                                            <!-- Pickup address fallback (shown only when PickupLocation is null) -->
                                             <TextBlock Style="{StaticResource JobSubtext}"
-                                                       Visibility="{Binding PickupAddress, Converter={StaticResource NullToCollapsed}}">
+                                                       Visibility="{Binding PickupLocation, Converter={StaticResource NullToVisibilityConverter}}">
                                                 <Run Text="Pickup:   "/><Run Text="{Binding PickupAddress, Mode=OneWay}"/>
                                                 <Run Text="{Binding PickupWindowStart, Mode=OneWay, StringFormat=' ({0:h:mm tt}'}"/>
                                                 <Run Text="{Binding PickupWindowEnd,   Mode=OneWay, StringFormat='–{0:h:mm tt})'}"/>
                                             </TextBlock>
+                                            <!-- Delivery: ReceiverName — LocationName (shown when DeliveryLocation is set) -->
+                                            <TextBlock Style="{StaticResource JobSubtext}" FontSize="11"
+                                                       Visibility="{Binding DeliveryLocation, Converter={StaticResource NullToCollapsed}}">
+                                                <Run Text="Delivery: "/><Run Text="{Binding Receiver.Name, Mode=OneWay}"/>
+                                                <Run Text=" — "/><Run Text="{Binding DeliveryLocation.Name, Mode=OneWay}"/>
+                                                <Run Text="{Binding DeliveryWindowStart, Mode=OneWay, StringFormat=' ({0:h:mm tt}'}"/>
+                                                <Run Text="{Binding DeliveryWindowEnd,   Mode=OneWay, StringFormat='–{0:h:mm tt})'}"/>
+                                            </TextBlock>
+                                            <!-- Delivery address fallback (shown only when DeliveryLocation is null) -->
                                             <TextBlock Style="{StaticResource JobSubtext}"
-                                                       Visibility="{Binding DeliveryAddress, Converter={StaticResource NullToCollapsed}}">
+                                                       Visibility="{Binding DeliveryLocation, Converter={StaticResource NullToVisibilityConverter}}">
                                                 <Run Text="Delivery: "/><Run Text="{Binding DeliveryAddress, Mode=OneWay}"/>
                                                 <Run Text="{Binding DeliveryWindowStart, Mode=OneWay, StringFormat=' ({0:h:mm tt}'}"/>
                                                 <Run Text="{Binding DeliveryWindowEnd,   Mode=OneWay, StringFormat='–{0:h:mm tt})'}"/>
@@ -106,6 +131,11 @@
                                             </TextBlock>
                                             <TextBlock Style="{StaticResource JobPriority}">
                                                 <Run Text="Priority: "/><Run Text="{Binding Priority, Mode=OneWay}"/>
+                                            </TextBlock>
+                                            <!-- Customer name — collapses when null -->
+                                            <TextBlock Style="{StaticResource JobSubtext}" FontSize="11"
+                                                       Visibility="{Binding Customer, Converter={StaticResource NullToCollapsed}}">
+                                                <Run Text="Cust: "/><Run Text="{Binding Customer.Name, Mode=OneWay}"/>
                                             </TextBlock>
                                         </StackPanel>
                                     </Border>
