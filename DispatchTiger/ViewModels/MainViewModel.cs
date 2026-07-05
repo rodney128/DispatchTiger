@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Windows.Input;
 using DispatchTiger.Models;
 using DispatchTiger.Services;
@@ -12,11 +14,21 @@ namespace DispatchTiger.ViewModels
     /// Main view model for the dispatcher application.
     /// Manages UI state, data collections, selections, and the assignment workflow.
     /// </summary>
-    public class MainViewModel
+    public class MainViewModel : INotifyPropertyChanged
     {
+        public event PropertyChangedEventHandler? PropertyChanged;
+
+        private void OnPropertyChanged([CallerMemberName] string? name = null)
+            => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+
         private Job? _selectedJob;
         private Truck? _selectedTruck;
         private string _currentView = "Day"; // "Day" or "Month"
+        private string _statusMessage = "Ready";
+
+        // One-level undo: stores the state needed to reverse the most recent manual assignment.
+        private record UndoRecord(Job Job, Assignment AddedAssignment);
+        private UndoRecord? _undoRecord;
 
         public ObservableCollection<Job> UnassignedJobs { get; }
         public ObservableCollection<Truck> AvailableTrucks { get; }
@@ -26,22 +38,38 @@ namespace DispatchTiger.ViewModels
         public Job? SelectedJob
         {
             get => _selectedJob;
-            set => _selectedJob = value;
+            set { _selectedJob = value; OnPropertyChanged(); }
         }
 
         public Truck? SelectedTruck
         {
             get => _selectedTruck;
-            set => _selectedTruck = value;
+            set { _selectedTruck = value; OnPropertyChanged(); }
         }
 
         public string CurrentView
         {
             get => _currentView;
-            set => _currentView = value;
+            set { _currentView = value; OnPropertyChanged(); }
         }
 
+        /// <summary>Short status message shown in the footer after key dispatcher actions.</summary>
+        public string StatusMessage
+        {
+            get => _statusMessage;
+            set { _statusMessage = value; OnPropertyChanged(); }
+        }
+
+        /// <summary>True when a manual assignment can be undone.</summary>
+        public bool CanUndo => _undoRecord != null;
+
         public ICommand AssignJobCommand { get; }
+        public ICommand UndoCommand { get; }
+
+        /// <summary>Footer dispatch pulse counts, kept live via CollectionChanged.</summary>
+        public int UnassignedCount => UnassignedJobs.Count;
+        public int AssignedCount => AllJobs.Count(j => j.Status != DispatchStatus.Unassigned);
+        public int TruckCount => AvailableTrucks.Count;
 
         public MainViewModel()
         {
@@ -50,7 +78,12 @@ namespace DispatchTiger.ViewModels
             AllJobs = new ObservableCollection<Job>();
             Assignments = new ObservableCollection<Assignment>();
 
+            UnassignedJobs.CollectionChanged += (_, __) => { OnPropertyChanged(nameof(UnassignedCount)); OnPropertyChanged(nameof(AssignedCount)); };
+            AllJobs.CollectionChanged += (_, __) => OnPropertyChanged(nameof(AssignedCount));
+            AvailableTrucks.CollectionChanged += (_, __) => OnPropertyChanged(nameof(TruckCount));
+
             AssignJobCommand = new RelayCommand(AssignJob, CanAssignJob);
+            UndoCommand = new RelayCommand(UndoAssignment, () => CanUndo);
 
             LoadSeedData();
         }
@@ -120,12 +153,50 @@ namespace DispatchTiger.ViewModels
 
             Assignments.Add(assignment);
 
+            // Store one-level undo record before clearing selection
+            _undoRecord = new UndoRecord(SelectedJob, assignment);
+            OnPropertyChanged(nameof(CanUndo));
+
             // Remove from unassigned list
             UnassignedJobs.Remove(SelectedJob);
 
             // Clear selection
             SelectedJob = null;
             SelectedTruck = null;
+        }
+
+        /// <summary>
+        /// Reverses the most recent manual assignment (one-level undo).
+        /// </summary>
+        private void UndoAssignment()
+        {
+            if (_undoRecord == null)
+                return;
+
+            var (job, addedAssignment) = _undoRecord;
+
+            // Verify the job still exists in AllJobs and is still in Assigned state
+            if (!AllJobs.Contains(job) || job.Status != DispatchStatus.Assigned)
+            {
+                StatusMessage = "↶ Undo not available — job state has changed.";
+                _undoRecord = null;
+                OnPropertyChanged(nameof(CanUndo));
+                return;
+            }
+
+            // Reverse what AssignJob did
+            job.Status = DispatchStatus.Unassigned;
+            job.TruckId = null;
+            job.Truck = null;
+
+            Assignments.Remove(addedAssignment);
+            UnassignedJobs.Add(job);
+
+            StatusMessage = $"\u21B6 Undid assignment of \"{job.Description}\"";
+
+            // Clear the undo record — one-level only
+            _undoRecord = null;
+            OnPropertyChanged(nameof(CanUndo));
         }
 
         /// <summary>

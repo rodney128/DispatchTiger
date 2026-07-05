@@ -13,35 +13,40 @@ namespace DispatchTiger.Services
     {
         private static readonly Random Random = new(42); // Fixed seed for consistency
 
-        private static readonly string[] PickupAddresses = new[]
-        {
-            "123 Main St, City A",
-            "456 Oak Ave, City B",
-            "789 Pine Rd, City C",
-            "321 Elm St, City A",
-            "654 Maple Dr, City B",
-            "987 Birch Ln, City C",
-            "111 Cedar Way, City A",
-            "222 Spruce Ct, City B",
+        private static readonly string?[] PickupAddresses =
+        [
+            "123 Beacon Ave, Sidney",
+            "450 Douglas St, Victoria",
+            "88 Goldstream Ave, Langford",
+            "22 Terminal Ave, Nanaimo",
+            "700 Canada Ave, Duncan",
+            "3100 Blanshard St, Saanich",
+            "1913 Sooke Rd, Colwood",
+            "2200 Oak Bay Ave, Oak Bay",
+            "1150 Esquimalt Rd, Esquimalt",
+            "6700 Sooke Rd, Sooke",
+            "9805 Third St, Sidney",
             null, // Some missing addresses
-            "333 Willow St, City C",
-            "444 Ash Rd, City A",
-            "555 Poplar Ave, City B"
-        };
+            "1234 Government St, Victoria",
+            "560 Thetis Vale Cres, Langford",
+            "40 Front St, Nanaimo",
+        ];
 
-        private static readonly string[] DeliveryAddresses = new[]
-        {
-            "9999 Delivery Pl, Warehouse Zone A",
-            "8888 Distribution Dr, Warehouse Zone B",
-            "7777 Logistics Ln, Warehouse Zone A",
-            "6666 Fulfillment Way, Warehouse Zone C",
-            "5555 Shipping St, Warehouse Zone B",
-            "4444 Handling Rd, Warehouse Zone A",
+        private static readonly string?[] DeliveryAddresses =
+        [
+            "800 Cloverdale Ave, Saanich",
+            "2600 Rock Bay Ave, Victoria",
+            "101 Helmcken Rd, Langford",
+            "1200 Old Island Hwy, Colwood",
+            "311 Trunk Rd, Duncan",
+            "6675 Sooke Rd, Sooke",
+            "1399 McKenzie Ave, Saanich",
+            "2500 Hackett Cres, Sidney",
+            "150 Craig St, Esquimalt",
             null, // Some missing addresses
-            "3333 Processing Ave, Warehouse Zone C",
-            "2222 Sorting Dr, Warehouse Zone B",
-            "1111 Packing Ln, Warehouse Zone A"
-        };
+            "4475 Victoria Ave, Nanaimo",
+            "1170 Oak Bay Ave, Oak Bay",
+        ];
 
         private static readonly string[] JobDescriptions = new[]
         {
@@ -57,7 +62,7 @@ namespace DispatchTiger.Services
             "Equipment transport"
         };
 
-        private static readonly string[] VehicleTypes = new[]
+        private static readonly string?[] VehicleTypes = new string?[]
         {
             "Van",
             "Truck",
@@ -66,6 +71,18 @@ namespace DispatchTiger.Services
             null, // Some missing vehicle types
             "Cargo Van"
         };
+
+        private static readonly string[] TruckLocations = new[]
+        {
+            "Sidney", "Victoria", "Langford", "Nanaimo", "Duncan",
+            "Saanich", "Colwood", "Oak Bay", "Esquimalt", "Sooke"
+        };
+
+        // Values intentionally overlap with VehicleTypes so matches are possible
+        private static readonly string[] RequiredEquipmentOptions =
+        [
+            "Van", "Box Truck", "Flatbed", "Cargo Van", "Truck"
+        ];
 
         private static readonly string[] DriverNames = new[]
         {
@@ -125,7 +142,15 @@ namespace DispatchTiger.Services
                     DriverId = driverId,
                     Driver = driverId.HasValue ? drivers.First(d => d.Id == driverId) : null,
                     Capacity = Random.Next(100) < 30 ? null : Random.Next(500, 5000), // Some missing capacity
-                    IsAvailable = Random.Next(100) > 20 // 80% available
+                    IsAvailable = Random.Next(100) > 20, // 80% available
+                    // AvailableAt: ~70% of trucks have a known free time today
+                    AvailableAt = Random.Next(100) < 70
+                        ? DateTime.Today.AddHours(Random.Next(7, 18)).AddMinutes(Random.Next(0, 4) * 15)
+                        : null,
+                    // CurrentLocation: ~75% of trucks have a known location
+                    CurrentLocation = Random.Next(100) < 75
+                        ? TruckLocations[Random.Next(TruckLocations.Length)]
+                        : null
                 });
             }
             return trucks;
@@ -175,6 +200,22 @@ namespace DispatchTiger.Services
                 };
 
                 jobs.Add(job);
+
+                // Assign pickup/delivery time windows to ~60% of jobs for realistic display
+                if (Random.Next(100) < 60)
+                {
+                    var pickupHour = Random.Next(6, 11); // 6–10 AM pickup start
+                    job.PickupWindowStart        = scheduledDate.AddHours(pickupHour);
+                    job.PickupWindowEnd          = job.PickupWindowStart.Value.AddHours(2);
+                    job.DeliveryWindowStart      = job.PickupWindowEnd.Value.AddMinutes(Random.Next(30, 121));
+                    job.DeliveryWindowEnd        = job.DeliveryWindowStart.Value.AddHours(Random.Next(2, 4));
+                    job.EstimatedPickupMinutes   = Random.Next(15, 46);
+                    job.EstimatedDeliveryMinutes = Random.Next(20, 61);
+                }
+
+                // Assign RequiredEquipment to ~50% of jobs using values that can match truck VehicleType
+                if (Random.Next(100) < 50)
+                    job.RequiredEquipment = RequiredEquipmentOptions[Random.Next(RequiredEquipmentOptions.Length)];
 
                 // Create assignment if job is assigned
                 if (isAssigned && truck != null)

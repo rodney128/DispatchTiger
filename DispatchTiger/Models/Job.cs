@@ -21,6 +21,17 @@ namespace DispatchTiger.Models
         public int? Priority { get; set; }
         public string? Notes { get; set; }
 
+        // Pickup/delivery time-window fields — real dispatch timing constraints
+        public DateTime? PickupWindowStart { get; set; }
+        public DateTime? PickupWindowEnd { get; set; }
+        public DateTime? DeliveryWindowStart { get; set; }
+        public DateTime? DeliveryWindowEnd { get; set; }
+        public int? EstimatedPickupMinutes { get; set; }   // Expected loading duration
+        public int? EstimatedDeliveryMinutes { get; set; } // Expected unloading duration
+
+        /// <summary>Truck/equipment type required for this job, e.g. Flatbed, Box Truck, Reefer (null = no specific requirement).</summary>
+        public string? RequiredEquipment { get; set; }
+
         public override string ToString() => $"Job {Id}: {Description}";
     }
 }

@@ -5,16 +5,21 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:DispatchTiger"
         xmlns:views="clr-namespace:DispatchTiger.Views"
+        xmlns:conv="clr-namespace:DispatchTiger.Converters"
         mc:Ignorable="d"
         Title="Dispatch Tiger" 
         Height="700" 
         Width="1200"
         WindowStartupLocation="CenterScreen"
         WindowState="Maximized">
+    <Window.Resources>
+        <conv:NullToCollapsedConverter x:Key="NullToCollapsed"/>
+    </Window.Resources>
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="24"/>
         </Grid.RowDefinitions>
 
         <!-- Branded Header with Tiger Icon -->
@@ -65,17 +70,42 @@
                                 <DataTemplate>
                                     <Border 
                                         Name="JobBorder"
-                                        Style="{StaticResource JobCardBorder}"
                                         MouseLeftButtonUp="JobBorder_MouseLeftButtonUp">
+                                        <Border.Style>
+                                            <Style TargetType="Border" BasedOn="{StaticResource JobCardBorder}">
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding DataContext.SelectedJob,
+                                                                     RelativeSource={RelativeSource AncestorType=Window}}"
+                                                                 Value="{Binding}">
+                                                        <Setter Property="Background"      Value="#303030"/>
+                                                        <Setter Property="BorderBrush"     Value="#F28C28"/>
+                                                        <Setter Property="BorderThickness" Value="3,1,1,1"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Border.Style>
                                         <StackPanel>
                                             <TextBlock Text="{Binding Description}" Style="{StaticResource JobDescription}"/>
-                                            <TextBlock Style="{StaticResource JobSubtext}">
-                                                <Run Text="Delivery: "/>
-                                                <Run Text="{Binding DeliveryAddress}"/>
+                                            <TextBlock Style="{StaticResource JobSubtext}"
+                                                       Visibility="{Binding PickupAddress, Converter={StaticResource NullToCollapsed}}">
+                                                <Run Text="Pickup:   "/><Run Text="{Binding PickupAddress, Mode=OneWay}"/>
+                                                <Run Text="{Binding PickupWindowStart, Mode=OneWay, StringFormat=' ({0:h:mm tt}'}"/>
+                                                <Run Text="{Binding PickupWindowEnd,   Mode=OneWay, StringFormat='–{0:h:mm tt})'}"/>
+                                            </TextBlock>
+                                            <TextBlock Style="{StaticResource JobSubtext}"
+                                                       Visibility="{Binding DeliveryAddress, Converter={StaticResource NullToCollapsed}}">
+                                                <Run Text="Delivery: "/><Run Text="{Binding DeliveryAddress, Mode=OneWay}"/>
+                                                <Run Text="{Binding DeliveryWindowStart, Mode=OneWay, StringFormat=' ({0:h:mm tt}'}"/>
+                                                <Run Text="{Binding DeliveryWindowEnd,   Mode=OneWay, StringFormat='–{0:h:mm tt})'}"/>
+                                            </TextBlock>
+                                            <TextBlock Style="{StaticResource JobSubtext}"
+                                                       Visibility="{Binding ScheduledDate, Converter={StaticResource NullToCollapsed}}">
+                                                <Run Text="Sched:    "/>
+                                                <Run Text="{Binding ScheduledDate, Mode=OneWay, StringFormat='{}{0:MM/dd}'}"/>
+                                                <Run Text="{Binding ScheduledTime, Mode=OneWay, StringFormat=' @{0:D2}:00'}"/>
                                             </TextBlock>
                                             <TextBlock Style="{StaticResource JobPriority}">
-                                                <Run Text="Priority: "/>
-                                                <Run Text="{Binding Priority}"/>
+                                                <Run Text="Priority: "/><Run Text="{Binding Priority, Mode=OneWay}"/>
                                             </TextBlock>
                                         </StackPanel>
                                     </Border>
@@ -120,7 +150,72 @@
                 <!-- View Content -->
                 <ContentControl Grid.Row="1" Name="ViewContent" VerticalAlignment="Stretch" HorizontalAlignment="Stretch" />
             </Grid>
+
         </Grid>
+
+        <!-- Footer -->
+        <Border Grid.Row="2"
+                Background="#1A1A1A"
+                BorderBrush="#3A3A3A"
+                BorderThickness="0,1,0,0"
+                Padding="10,0">
+            <DockPanel LastChildFill="True">
+                <!-- Left-to-right pulse items, docked so status can fill the rest -->
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" DockPanel.Dock="Left">
+                    <TextBlock Text="DispatchTiger"
+                               FontSize="11" FontWeight="SemiBold"
+                               Foreground="#F28C28"/>
+                    <TextBlock Text=" | " FontSize="11" Foreground="#444444"/>
+                    <TextBlock FontSize="11" Foreground="#888888">
+                        <Run Text="{Binding CurrentView, StringFormat='{}{0} View'}"/>
+                    </TextBlock>
+                    <TextBlock Text=" | " FontSize="11" Foreground="#444444"/>
+                    <TextBlock FontSize="11" Foreground="#888888">
+                        <Run Text="Unassigned: "/><Run Text="{Binding UnassignedCount, Mode=OneWay}"/>
+                    </TextBlock>
+                    <TextBlock Text=" | " FontSize="11" Foreground="#444444"/>
+                    <TextBlock FontSize="11" Foreground="#888888">
+                        <Run Text="Assigned: "/><Run Text="{Binding AssignedCount, Mode=OneWay}"/>
+                    </TextBlock>
+                    <TextBlock Text=" | " FontSize="11" Foreground="#444444"/>
+                    <TextBlock FontSize="11" Foreground="#888888">
+                        <Run Text="Trucks: "/><Run Text="{Binding TruckCount, Mode=OneWay}"/>
+                    </TextBlock>
+                    <!-- Separator before status area -->
+                    <TextBlock Text=" | " FontSize="11" Foreground="#444444"/>
+                </StackPanel>
+                <!-- Status message + inline Undo button fill remaining footer space -->
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding StatusMessage, Mode=OneWay}"
+                               FontSize="11"
+                               Foreground="#CCCCCC"
+                               VerticalAlignment="Center"
+                               TextTrimming="CharacterEllipsis"/>
+                    <Button Content="  Undo  "
+                            Command="{Binding UndoCommand}"
+                            FontSize="10"
+                            Margin="10,0,0,0"
+                            Padding="5,1"
+                            Foreground="#F28C28"
+                            Background="Transparent"
+                            BorderBrush="#F28C28"
+                            BorderThickness="1"
+                            Cursor="Hand"
+                            VerticalAlignment="Center">
+                        <Button.Style>
+                            <Style TargetType="Button">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding CanUndo, Mode=OneWay}" Value="True">
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Button.Style>
+                    </Button>
+                </StackPanel>
+            </DockPanel>
+        </Border>
     </Grid>
 </Window>
 

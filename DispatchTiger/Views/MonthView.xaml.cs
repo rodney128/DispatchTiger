@@ -90,9 +90,9 @@ namespace DispatchTiger.Views
         {
             var border = new Border
             {
-                Background = new SolidColorBrush(Color.FromRgb(31, 31, 31)),
+                Background = new SolidColorBrush(Color.FromRgb(38, 38, 38)),
                 BorderThickness = new Thickness(1),
-                BorderBrush = new SolidColorBrush(Color.FromRgb(58, 58, 58)),
+                BorderBrush = new SolidColorBrush(Color.FromRgb(68, 68, 68)),
                 Margin = new Thickness(2),
                 Padding = new Thickness(4)
             };
