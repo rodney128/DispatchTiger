@@ -1,6 +1,7 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
@@ -16,6 +17,9 @@ namespace DispatchTiger.Views
     {
         private MainViewModel? _vm;
         private bool _webViewReady;
+        private bool _mapHtmlLoaded;                                    // true once NavigationCompleted fires successfully
+        private int? _lastFittedJobId;                                  // id of the last job we called fitBounds for; prevents refitting the same job
+        private System.Threading.CancellationTokenSource? _markerDebounce; // collapses rapid PropertyChanged firings
 
         public MapView()
         {
@@ -67,6 +71,20 @@ namespace DispatchTiger.Views
             return null;
         }
 
+
+        /// <summary>
+        /// Spreads markers that share the same base coordinate into a small circle so
+        /// they do not visually stack. Returns the original point when count <= 1.
+        /// Offset is deterministic: each index maps to a fixed angle.
+        /// Radius grows slightly with group size but is capped near the zone.
+        /// </summary>
+        private static (double Lat, double Lng) ApplyMarkerOffset(double baseLat, double baseLng, int index, int count)
+        {
+            if (count <= 1) return (baseLat, baseLng);
+            double radius = Math.Min(0.006 + (count - 2) * 0.001, 0.012);
+            double angle = 2 * Math.PI * index / count;
+            return (baseLat + Math.Cos(angle) * radius, baseLng + Math.Sin(angle) * radius);
+        }
         // ── Event handlers ────────────────────────────────────────────────────────
 
         private async void MapView_Loaded(object sender, RoutedEventArgs e)
@@ -76,7 +94,49 @@ namespace DispatchTiger.Views
 
         private void RefreshMapButton_Click(object sender, RoutedEventArgs e)
         {
-            RefreshMap();
+            FullReloadMap();
+        }
+
+        private async void FitToJobButton_Click(object sender, RoutedEventArgs e)
+        {
+            // Manual recentre — fits to all visible markers without a full reload.
+            await PushMarkersAsync(fitBounds: true);
+        }
+
+        private void AssignStagedButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_vm == null) return;
+            var job    = _vm.SelectedJob;
+            var staged = _vm.StagedTruck;
+            if (job == null || staged == null) return;
+            if (job.Status != DispatchStatus.Unassigned) return;
+
+            // Capture display values before Execute clears SelectedJob/StagedTruck
+            string capturedDesc  = job.Description;
+            string capturedPlate = staged.PlateNumber;
+
+            // Mirror the DayView assignment path exactly:
+            // set SelectedTruck at the moment of assignment, then invoke the command.
+            _vm.SelectedTruck = staged;
+
+            if (_vm.AssignJobCommand.CanExecute(null))
+            {
+                _vm.AssignJobCommand.Execute(null);
+                string ts = DateTime.Now.ToString("h:mm tt");
+                _vm.StatusMessage = $"\u2713 {ts} \u00B7 Assigned \"{capturedDesc}\" to {capturedPlate}";
+            }
+
+            // AssignJob() clears SelectedJob/SelectedTruck/StagedTruck.
+            // Vm_PropertyChanged fires → PushMarkersAsync → buttons collapse automatically.
+            // No NavigateToString, no manual marker reload needed here.
+        }
+
+        private void CancelStagingButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_vm == null) return;
+            // Clear staging only; keep SelectedJob so the dispatcher can re-pick a truck.
+            _vm.StagedTruck = null;
+            // Vm_PropertyChanged fires → PushMarkersAsync handles toolbar/marker update.
         }
 
         // ── Map initialisation ───────────────────────────────────────────────────────────
@@ -102,6 +162,20 @@ namespace DispatchTiger.Views
                 {
                     await MapWebView.EnsureCoreWebView2Async();
                     MapWebView.CoreWebView2.WebMessageReceived += HandleWebMessage;
+
+                    // Push markers after every successful navigation (initial load + Refresh Map).
+                    // _mapHtmlLoaded guards PushMarkersAsync so it only runs when the page is ready.
+                    MapWebView.CoreWebView2.NavigationCompleted += async (s, ev) =>
+                    {
+                        if (!ev.IsSuccess) return;
+                        _mapHtmlLoaded = true;
+                        // Give initMap() a moment to finish constructing the map object before
+                        // pushing markers.  Google Maps fires the callback asynchronously, so a
+                        // short delay is enough for the typical case.
+                        await Task.Delay(500);
+                        await Dispatcher.InvokeAsync(async () => await PushMarkersAsync(fitBounds: true));
+                    };
+
                     _webViewReady = true;
                 }
                 catch (Exception ex)
@@ -111,7 +185,7 @@ namespace DispatchTiger.Views
                 }
             }
 
-            RefreshMap();
+            FullReloadMap();
         }
 
         private void UpdateSetupStatusLine()
@@ -213,9 +287,9 @@ namespace DispatchTiger.Views
                 // Toolbar truck status line
                 UpdateTruckStatusText();
 
-                // SelectedTruck and StagedTruck changes both fire Vm_PropertyChanged -> RefreshMap.
+                // SelectedTruck and StagedTruck changes both fire Vm_PropertyChanged -> PushMarkersAsync.
                 // UpdateTruckStatusText is called synchronously here so the toolbar updates
-                // immediately without waiting for the async dispatch.
+                // immediately without waiting for the debounced async push.
             }
             catch
             {
@@ -225,43 +299,68 @@ namespace DispatchTiger.Views
 
         private void Vm_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
         {
-            if (e.PropertyName is nameof(MainViewModel.SelectedJob)
-                                or nameof(MainViewModel.SelectedTruck)
-                                or nameof(MainViewModel.StagedTruck))
+            if (e.PropertyName is not (nameof(MainViewModel.SelectedJob)
+                                   or nameof(MainViewModel.SelectedTruck)
+                                   or nameof(MainViewModel.StagedTruck)))
+                return;
+
+            // Viewport rules:
+            //   SelectedJob  → different job : fitBounds = true  (fit once to pickup/delivery/trucks)
+            //   SelectedJob  → same job again : fitBounds = false (suppress re-binding noise)
+            //   SelectedTruck / StagedTruck   : fitBounds = false (marker colour update only)
+            bool fitBounds = false;
+            if (e.PropertyName == nameof(MainViewModel.SelectedJob))
             {
-                // Must dispatch to UI thread since PropertyChanged can fire from any context
-                Dispatcher.InvokeAsync(RefreshMap);
+                int? newJobId = _vm?.SelectedJob?.Id;
+                // Only fit when the job truly changed (null→job, job→null, job→differentJob).
+                if (newJobId != _lastFittedJobId)
+                {
+                    fitBounds = true;
+                    _lastFittedJobId = newJobId;    // record now so a superseded debounce tick can't re-trigger
+                }
+                // Same job re-selected — keep the current center/zoom.
             }
+            // SelectedTruck / StagedTruck: markers update in-place; viewport never moves.
+
+            // Cancel any pending debounce tick, then start a fresh one.
+            // This collapses rapid SelectedTruck + StagedTruck changes (from a single map click)
+            // into a single marker push ~150 ms later.
+            var cts = new System.Threading.CancellationTokenSource();
+            System.Threading.Interlocked.Exchange(ref _markerDebounce, cts)?.Cancel();
+
+            bool doFit = fitBounds;   // capture for the lambda
+            var token  = cts.Token;
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(150, token);
+                    // Switch to the UI thread to call ExecuteScriptAsync + update toolbar
+                    await Dispatcher.InvokeAsync(async () =>
+                    {
+                        if (!token.IsCancellationRequested)
+                            await PushMarkersAsync(fitBounds: doFit);
+                    });
+                }
+                catch (System.Threading.Tasks.TaskCanceledException) { /* superseded — ignore */ }
+            });
         }
 
-        // ── Map refresh ───────────────────────────────────────────────────────────
+        // ── Map refresh ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-        private void RefreshMap()
+        /// <summary>
+        /// Full page reload: rebuilds the HTML skeleton and calls NavigateToString.
+        /// Called only on initial load, API key change, or explicit Refresh Map click.
+        /// Markers are pushed by NavigationCompleted -> PushMarkersAsync.
+        /// </summary>
+        private void FullReloadMap()
         {
             if (!_webViewReady || _vm == null)
                 return;
 
+            _mapHtmlLoaded = false;     // page is reloading; PushMarkersAsync will no-op until NavigationCompleted fires
             var apiKey = Environment.GetEnvironmentVariable("GOOGLE_MAPS_API_KEY") ?? "";
-            var html = BuildMapHtml(apiKey, _vm);
-            MapWebView.NavigateToString(html);
-
-            var job = _vm.SelectedJob;
-            MapStatusText.Text = job != null
-                ? $"Showing {_vm.AvailableTrucks.Count} trucks  \u00b7  Job: {job.Description}"
-                : $"Showing {_vm.AvailableTrucks.Count} trucks  \u00b7  Select a job to see pickup/delivery";
-
-            // Fit legend — visible only when a job is selected
-            if (job != null)
-            {
-                MapFitLegendText.Text = "Fit:  \u2605 Best  \u2022 Good  \u25B2 Risky  \u2022 Poor  \u2022 Blocked  \u2014 badge on each marker";
-                MapFitLegendText.Visibility = System.Windows.Visibility.Visible;
-            }
-            else
-            {
-                MapFitLegendText.Visibility = System.Windows.Visibility.Collapsed;
-            }
-
-            UpdateTruckStatusText();
+            MapWebView.NavigateToString(BuildMapHtml(apiKey));
         }
 
         private void UpdateTruckStatusText()
@@ -295,99 +394,103 @@ namespace DispatchTiger.Views
             }
         }
 
+		/// <summary>
+		/// Pushes the current marker data into the live map page via ExecuteScriptAsync.
+		/// Does NOT call NavigateToString — the viewport is preserved.
+		/// No-ops silently if the page is not yet ready.
+		/// </summary>
+		private async Task PushMarkersAsync(bool fitBounds)
+		{
+			if (!_mapHtmlLoaded || !_webViewReady || _vm == null)
+				return;
+
+			string json       = BuildMarkersJson(_vm);
+			string routeJson  = BuildRoutePreviewJson(_vm);
+			string fitArg     = fitBounds ? "true" : "false";
+			// Escape both JSON strings for embedding as JS string literals
+			string escaped      = json.Replace("\\", "\\\\").Replace("'", "\\'");
+			string routeEscaped = routeJson == "null" ? "null" : $"'{routeJson.Replace("\\", "\\\\").Replace("'", "\\'")}'";
+			string callJs       = $"window.dispatchTigerSetMarkers('{escaped}', {routeEscaped}, {fitArg});";
+
+			try
+			{
+				await MapWebView.ExecuteScriptAsync(callJs);
+			}
+			catch
+			{
+				// WebView not ready or page navigating — silently ignore
+			}
+
+			// Update toolbar text (same as before, just no map reload)
+				var job = _vm.SelectedJob;
+				MapStatusText.Text = job != null
+					? $"Showing {_vm.AvailableTrucks.Count} trucks  \u00b7  Job: {job.Description}"
+					: $"Showing {_vm.AvailableTrucks.Count} trucks  \u00b7  Select a job to see pickup/delivery";
+
+				// Assign / Cancel Staging buttons:
+				// Visible only when a job is selected, a truck is staged, and the job is still unassigned.
+				bool showAssign = job != null
+					&& _vm.StagedTruck != null
+					&& job.Status == DispatchStatus.Unassigned;
+
+				var assignVis = showAssign ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
+				AssignStagedButton.Content     = showAssign ? $"✓  Assign {_vm.StagedTruck!.PlateNumber}" : "✓  Assign";
+				AssignStagedButton.Visibility  = assignVis;
+				CancelStagingButton.Visibility = assignVis;
+
+				if (job != null)
+				{
+					MapFitLegendText.Text = "Fit:  ★ Best  • Good  ▲ Risky  • Poor  • Blocked  — badge on each marker";
+						MapFitLegendText.Visibility = System.Windows.Visibility.Visible;
+
+						// Route legend \u2014 straight-line preview only, not driving directions
+						MapRouteLegendText.Text = "Route preview (straight line):  ┄┄ truck → pickup  ── pickup → delivery";
+						MapRouteLegendText.Visibility = System.Windows.Visibility.Visible;
+
+					// Show manual recentre button so the dispatcher can fit back after panning
+					FitToJobButton.Visibility = System.Windows.Visibility.Visible;
+
+					// Recommended truck line
+					var rec = PickRecommendedTruck(job, _vm.AvailableTrucks);
+					if (rec != null)
+					{
+						var (tLbl, _) = DispatchFitService.GetTimeFit(job, rec);
+						var (rLbl, _) = DispatchFitService.GetRouteFit(job, rec);
+						var (eLbl, _) = DispatchFitService.GetEquipmentFit(job, rec);
+						string recFit = DispatchFitService.GetOverallFit(rec, tLbl, rLbl, eLbl);
+						MapRecommendedText.Text = $"⭐ Recommended: {rec.PlateNumber}  ·  {recFit} fit  ·  click marker to stage";
+						MapRecommendedText.Visibility = System.Windows.Visibility.Visible;
+					}
+					else
+					{
+						MapRecommendedText.Text = "Recommended: none";
+						MapRecommendedText.Visibility = System.Windows.Visibility.Visible;
+					}
+				}
+				else
+				{
+					FitToJobButton.Visibility = System.Windows.Visibility.Collapsed;
+						MapFitLegendText.Visibility = System.Windows.Visibility.Collapsed;
+						MapRecommendedText.Visibility = System.Windows.Visibility.Collapsed;
+						MapRouteLegendText.Visibility = System.Windows.Visibility.Collapsed;
+				}
+
+				UpdateTruckStatusText();
+		}
+
+
         // ── HTML builder ──────────────────────────────────────────────────────────
 
-        private static string BuildMapHtml(string apiKey, MainViewModel vm)
-        {
-            var sb = new StringBuilder();
+		private static string BuildMapHtml(string apiKey)
+		{
+			var mapId = Environment.GetEnvironmentVariable("GOOGLE_MAPS_MAP_ID") ?? "";
+			bool useAdvancedMarker = !string.IsNullOrWhiteSpace(mapId);
+			string mapIdLine      = useAdvancedMarker ? $"    mapId: '{EscapeJs(mapId)}'," : "";
+			string librariesParam = useAdvancedMarker ? "&libraries=marker" : "";
+			string dtUseAdv       = useAdvancedMarker ? "true" : "false";
 
-            // Optional Map ID for AdvancedMarkerElement (requires a real Cloud Console Map ID).
-            // Read from env var; leave empty to use legacy Marker instead.
-            var mapId = Environment.GetEnvironmentVariable("GOOGLE_MAPS_MAP_ID") ?? "";
-            bool useAdvancedMarker = !string.IsNullOrWhiteSpace(mapId);
-
-            // ── markers data ──────────────────────────────────────────────────────
-            var markersSb = new StringBuilder();
-            markersSb.Append("const markers = [];\n");
-
-            // Gold for staged truck (intended for assignment); also gold for selected if no staged
-            int stagedTruckId   = vm.StagedTruck?.Id   ?? -1;
-            int selectedTruckId = vm.SelectedTruck?.Id ?? -1;
-            var fitJob          = vm.SelectedJob;        // null when no job selected
-            foreach (var truck in vm.AvailableTrucks)
-            {
-                var coord = TryGetZoneCoordinate(truck.CurrentLocation);
-                if (coord == null) continue;
-
-                // Compute fit badge when a job is selected
-                string fitLabel  = "";
-                string fitReason = "";
-                if (fitJob != null)
-                {
-                    var (tLabel, tDetail) = DispatchFitService.GetTimeFit(fitJob, truck);
-                    var (rLabel, rDetail) = DispatchFitService.GetRouteFit(fitJob, truck);
-                    var (eLabel, _)       = DispatchFitService.GetEquipmentFit(fitJob, truck);
-                    fitLabel  = DispatchFitService.GetOverallFit(truck, tLabel, rLabel, eLabel);
-                    fitReason = BuildFitReason(tLabel, tDetail, rDetail);
-                }
-
-                var label = EscapeJs(BuildTruckLabel(truck, fitLabel, fitReason));
-                // Gold for staged or selected truck, blue for available, grey for unavailable
-                string color;
-                if (truck.Id == stagedTruckId)
-                    color = "#FFD700";            // gold — staged for assignment
-                else if (truck.Id == selectedTruckId)
-                    color = "#FFD700";            // gold — selected (no staged truck active)
-                else if (truck.IsAvailable)
-                    color = "#5B9BD5";            // blue — available
-                else
-                    color = "#888888";            // grey — unavailable
-
-                markersSb.Append(
-                    $"markers.push({{ lat: {coord.Value.Lat}, lng: {coord.Value.Lng}, " +
-                    $"label: '{label}', color: '{color}', type: 'truck', truckId: {truck.Id} }});\n");
-            }
-
-            // Pickup marker
-            var job = vm.SelectedJob;
-            if (job != null)
-            {
-                var pickupCoord = TryGetZoneCoordinate(job.PickupLocation?.Zone)
-                               ?? TryGetZoneCoordinate(job.PickupLocation?.Address)
-                               ?? TryGetZoneCoordinate(job.PickupAddress);
-                if (pickupCoord != null)
-                {
-                    var label = EscapeJs(BuildPickupLabel(job));
-                    markersSb.Append(
-                        $"markers.push({{ lat: {pickupCoord.Value.Lat}, lng: {pickupCoord.Value.Lng}, " +
-                        $"label: '{label}', color: '#34A853', type: 'pickup' }});\n");
-                }
-
-                var deliveryCoord = TryGetZoneCoordinate(job.DeliveryLocation?.Zone)
-                                 ?? TryGetZoneCoordinate(job.DeliveryLocation?.Address)
-                                 ?? TryGetZoneCoordinate(job.DeliveryAddress);
-                if (deliveryCoord != null)
-                {
-                    var label = EscapeJs(BuildDeliveryLabel(job));
-                    markersSb.Append(
-                        $"markers.push({{ lat: {deliveryCoord.Value.Lat}, lng: {deliveryCoord.Value.Lng}, " +
-                        $"label: '{label}', color: '#EA4335', type: 'delivery' }});\n");
-                }
-            }
-
-            // ── marker JS: AdvancedMarkerElement when Map ID present, legacy Marker otherwise ──
-            string markerCreationJs = useAdvancedMarker
-                ? BuildAdvancedMarkerJs()
-                : BuildLegacyMarkerJs();
-
-            // ── map options ───────────────────────────────────────────────────────
-            string mapIdLine = useAdvancedMarker ? $"    mapId: '{EscapeJs(mapId)}'," : "";
-
-            // ── libraries param ───────────────────────────────────────────────────
-            string librariesParam = useAdvancedMarker ? "&libraries=marker" : "";
-
-            // ── HTML ──────────────────────────────────────────────────────────────
-            sb.Append($@"<!DOCTYPE html>
+			return
+$@"<!DOCTYPE html>
 <html>
 <head>
 <meta charset='utf-8'/>
@@ -398,117 +501,481 @@ namespace DispatchTiger.Views
 <body>
 <div id='map'></div>
 <script>
-{markersSb}
+window.dispatchTigerMap        = null;
+window.dispatchTigerMarkerObjs = [];
+window.dispatchTigerRouteLines = [];   // Polyline objects for the current route preview
+window.dispatchTigerInfoWindow = null;
+var _dtUseAdvanced = {dtUseAdv};
 
 async function initMap() {{
   const {{ Map }} = await google.maps.importLibrary('maps');
-
-  const map = new Map(document.getElementById('map'), {{
-    center: {{ lat: 48.60, lng: -123.55 }},
-    zoom: 9,
+  window.dispatchTigerMap = new Map(document.getElementById('map'), {{
+	center: {{ lat: 48.60, lng: -123.55 }},
+	zoom: 9,
 {mapIdLine}
-    mapTypeId: 'roadmap',
-    backgroundColor: '#1a1a1a',
+	mapTypeId: 'roadmap',
+	backgroundColor: '#1a1a1a',
   }});
-
-  if (markers.length === 0) return;
-
-  const bounds = new google.maps.LatLngBounds();
-  markers.forEach(function(m) {{ bounds.extend({{ lat: m.lat, lng: m.lng }}); }});
-
-{markerCreationJs}
-
-  if (markers.length === 1) {{
-    map.setCenter({{ lat: markers[0].lat, lng: markers[0].lng }});
-    map.setZoom(12);
-  }} else {{
-    map.fitBounds(bounds, 60);
-  }}
+  window.dispatchTigerInfoWindow = new google.maps.InfoWindow();
 }}
+
+window.dispatchTigerClearMarkers = function() {{
+  window.dispatchTigerMarkerObjs.forEach(function(m) {{
+	if (m.setMap) m.setMap(null);
+	else if (typeof m.map !== 'undefined') m.map = null;
+  }});
+  window.dispatchTigerMarkerObjs = [];
+}};
+
+// Removes all current route preview polylines from the map.
+window.dispatchTigerClearRouteLines = function() {{
+  window.dispatchTigerRouteLines.forEach(function(l) {{ l.setMap(null); }});
+  window.dispatchTigerRouteLines = [];
+}};
+
+// jsonStr    : JSON array of marker objects (unchanged from before)
+// routeJson  : JSON object with optional truckToPickup / pickupToDelivery legs, or null
+// fitBounds  : boolean — whether to fit the viewport to all visible points
+window.dispatchTigerSetMarkers = async function(jsonStr, routeJson, fitBounds) {{
+  if (!window.dispatchTigerMap) return;
+  window.dispatchTigerClearMarkers();
+  window.dispatchTigerClearRouteLines();
+  var markers; try {{ markers = JSON.parse(jsonStr); }} catch(e) {{ return; }}
+  if (!markers || markers.length === 0) return;
+  var map  = window.dispatchTigerMap;
+  var info = window.dispatchTigerInfoWindow;
+  if (_dtUseAdvanced) {{
+	var {{ AdvancedMarkerElement }} = await google.maps.importLibrary('marker');
+	markers.forEach(function(m) {{
+	  var pin;
+	  if (m.type === 'truck' && m.icon) {{
+		pin = document.createElement('img');
+		pin.src = m.icon;
+		pin.width  = m.iconW || 48;
+		pin.height = m.iconH || 32;
+		pin.style.cssText = 'cursor:pointer;display:block;filter:drop-shadow(0 2px 3px rgba(0,0,0,.6))';
+	  }} else {{
+		pin = document.createElement('div');
+		pin.style.cssText = ['background:'+m.color,'color:#fff','border-radius:6px','padding:4px 8px','font:bold 11px/1.3 sans-serif','max-width:180px','white-space:pre-wrap','word-break:break-word','box-shadow:0 2px 6px rgba(0,0,0,.5)','cursor:pointer'].join(';');
+		pin.textContent = m.label;
+	  }}
+	  var marker = new AdvancedMarkerElement({{ map:map, position:{{lat:m.lat,lng:m.lng}}, content:pin, title:m.label }});
+	  marker.addListener('click', function() {{
+		info.setContent('<div style=""font:13px sans-serif;white-space:pre-wrap;max-width:260px"">' + m.label.replace(/\n/g,'<br>') + '</div>');
+		info.open({{ anchor:marker, map }});
+		if (m.type==='truck' && window.chrome && chrome.webview) chrome.webview.postMessage({{type:'truckClicked',truckId:m.truckId}});
+	  }});
+	  window.dispatchTigerMarkerObjs.push(marker);
+	}});
+  }} else {{
+	markers.forEach(function(m) {{
+	  var iw = m.iconW || 48, ih = m.iconH || 32;
+	  var icon = m.icon
+		? {{ url:m.icon, scaledSize:new google.maps.Size(iw,ih), anchor:new google.maps.Point(iw/2,ih-4) }}
+		: {{ path:google.maps.SymbolPath.CIRCLE, scale:10, fillColor:m.color, fillOpacity:1, strokeColor:'#ffffff', strokeWeight:2 }};
+	  var marker = new google.maps.Marker({{ map:map, position:{{lat:m.lat,lng:m.lng}}, icon:icon, title:m.label }});
+	  marker.addListener('click', function() {{
+		info.setContent('<div style=""font:13px sans-serif;white-space:pre-wrap;max-width:260px;padding:4px"">' + m.label.replace(/\n/g,'<br>') + '</div>');
+		info.open(map, marker);
+		if (m.type==='truck' && window.chrome && chrome.webview) chrome.webview.postMessage({{type:'truckClicked',truckId:m.truckId}});
+	  }});
+	  window.dispatchTigerMarkerObjs.push(marker);
+	}});
+  }}
+
+  // Draw straight-line route preview polylines (no Directions API).
+  // routeJson may be null (no job selected) or contain truckToPickup and/or pickupToDelivery legs.
+  var routeBoundsPoints = [];
+  if (routeJson) {{
+	var route; try {{ route = JSON.parse(routeJson); }} catch(e) {{ route = null; }}
+	if (route) {{
+	  // Dashed gold line: truck (or recommended truck) → pickup (deadhead / empty leg)
+	  if (route.truckToPickup) {{
+		var leg = route.truckToPickup;
+		var path = [{{lat:leg.fromLat,lng:leg.fromLng}},{{lat:leg.toLat,lng:leg.toLng}}];
+		var opacity = leg.isStaged ? 0.85 : 0.55;   // staged truck line looks stronger
+		var weight  = leg.isStaged ? 3   : 2;
+		var dashedLine = new google.maps.Polyline({{
+		  map: map,
+		  path: path,
+		  strokeColor: '#F5A623',    // gold-orange: deadhead / empty leg
+		  strokeOpacity: 0,          // transparent stroke so dashes show through
+		  strokeWeight: 0,
+		  icons: [{{
+			icon: {{ path:'M 0,-1 0,1', strokeOpacity: opacity, strokeWeight: weight, scale: 4 }},
+			offset: '0', repeat: '14px'
+		  }}]
+		}});
+		window.dispatchTigerRouteLines.push(dashedLine);
+		routeBoundsPoints.push({{lat:leg.fromLat,lng:leg.fromLng}});
+		routeBoundsPoints.push({{lat:leg.toLat,  lng:leg.toLng  }});
+	  }}
+	  // Solid teal line: pickup → delivery (loaded leg)
+	  if (route.pickupToDelivery) {{
+		var leg2 = route.pickupToDelivery;
+		var solidLine = new google.maps.Polyline({{
+		  map: map,
+		  path: [{{lat:leg2.fromLat,lng:leg2.fromLng}},{{lat:leg2.toLat,lng:leg2.toLng}}],
+		  strokeColor: '#4DD0C4',    // teal: loaded / revenue leg
+		  strokeOpacity: 0.80,
+		  strokeWeight: 3
+		}});
+		window.dispatchTigerRouteLines.push(solidLine);
+		routeBoundsPoints.push({{lat:leg2.fromLat,lng:leg2.fromLng}});
+		routeBoundsPoints.push({{lat:leg2.toLat,  lng:leg2.toLng  }});
+	  }}
+	}}
+  }}
+
+  if (fitBounds) {{
+	// Build bounds from markers + route endpoints so manual Fit to Job includes route.
+	var allPoints = markers.map(function(m){{return {{lat:m.lat,lng:m.lng}};}})
+						   .concat(routeBoundsPoints);
+	if (allPoints.length === 1) {{
+	  map.setCenter(allPoints[0]); map.setZoom(12);
+	}} else {{
+	  var b = new google.maps.LatLngBounds();
+	  allPoints.forEach(function(p){{ b.extend(p); }});
+	  map.fitBounds(b, 60);
+	}}
+  }}
+}};
 </script>
 <script src='https://maps.googleapis.com/maps/api/js?key={apiKey}&v=weekly{librariesParam}&callback=initMap' async defer></script>
 </body>
-</html>");
+</html>";
+		}
 
-            return sb.ToString();
+		/// <summary>
+		/// Selects the best available truck to highlight as recommended on the map.
+		/// Uses the same ranking and tie-breakers as Day View candidate ordering:
+		/// fit rank (Best=0, Good=1, Risky=2), then earliest AvailableAt, then PlateNumber.
+		/// Blocked, Unknown, and unavailable trucks are excluded.
+		/// Returns null when no job is selected or no suitable truck exists.
+		/// </summary>
+		private static Truck? PickRecommendedTruck(Job job, IEnumerable<Truck> trucks)
+		{
+			return trucks
+				.Where(t => t.IsAvailable)
+				.Select(t =>
+				{
+					var (tLabel, _) = DispatchFitService.GetTimeFit(job, t);
+					var (rLabel, _) = DispatchFitService.GetRouteFit(job, t);
+					var (eLabel, _) = DispatchFitService.GetEquipmentFit(job, t);
+					string fit      = DispatchFitService.GetOverallFit(t, tLabel, rLabel, eLabel);
+					return (truck: t, fit);
+				})
+				.Where(x => x.fit is "Best" or "Good" or "Risky")
+				.OrderBy(x  => DispatchFitService.GetOverallFitSortRank(x.fit))
+				.ThenBy(x   => x.truck.AvailableAt ?? DateTime.MaxValue)
+				.ThenBy(x   => x.truck.PlateNumber, StringComparer.OrdinalIgnoreCase)
+				.FirstOrDefault()
+				.truck;
+		}
+
+		/// <summary>
+		/// Builds the JSON array string that feeds window.dispatchTigerSetMarkers().
+		/// Contains all truck markers (with vehicle SVG icons and status colours),
+		/// plus pickup and delivery markers when a job is selected.
+		/// </summary>
+		private static string BuildMarkersJson(MainViewModel vm)
+		{
+			var sb = new StringBuilder();
+			sb.Append('[');
+			bool first = true;
+
+			int stagedTruckId   = vm.StagedTruck?.Id   ?? -1;
+			int selectedTruckId = vm.SelectedTruck?.Id ?? -1;
+			var fitJob          = vm.SelectedJob;
+
+			// Determine recommended truck once (only when a job is selected)
+			int recommendedTruckId = fitJob != null
+				? PickRecommendedTruck(fitJob, vm.AvailableTrucks)?.Id ?? -1
+				: -1;
+
+			// ── Truck markers (vehicle-shaped, status coloured, offset for stacking) ──
+			var truckCoords = vm.AvailableTrucks
+				.Select(t => (truck: t, coord: TryGetZoneCoordinate(t.CurrentLocation)))
+				.Where(x => x.coord != null)
+				.OrderBy(x => x.truck.Id)
+				.ToList();
+
+			var coordGroups = truckCoords
+				.GroupBy(x => x.coord!.Value)
+				.ToList();
+
+			foreach (var group in coordGroups)
+			{
+				var members = group.ToList();
+				int count   = members.Count;
+
+				for (int idx = 0; idx < count; idx++)
+				{
+					var truck = members[idx].truck;
+					var (baseLat, baseLng) = group.Key;
+					var (lat, lng) = ApplyMarkerOffset(baseLat, baseLng, idx, count);
+
+					string fitLabel  = "";
+					string fitReason = "";
+					if (fitJob != null)
+					{
+						var (tLabel, tDetail) = DispatchFitService.GetTimeFit(fitJob, truck);
+						var (rLabel, rDetail) = DispatchFitService.GetRouteFit(fitJob, truck);
+						var (eLabel, _)       = DispatchFitService.GetEquipmentFit(fitJob, truck);
+						fitLabel  = DispatchFitService.GetOverallFit(truck, tLabel, rLabel, eLabel);
+						fitReason = BuildFitReason(tLabel, tDetail, rDetail);
+					}
+
+					string color = truck.Id == stagedTruckId   ? "#FFD700"
+								 : truck.Id == selectedTruckId ? "#FFD700"
+								 : truck.IsAvailable           ? "#5B9BD5"
+								 :                               "#888888";
+
+					bool isRecommended = truck.Id == recommendedTruckId;
+
+					string label   = EscapeJs(BuildTruckLabel(truck, fitLabel, fitReason));
+					string iconUrl = GetVehicleMarkerSvg(truck, color, isRecommended);
+
+					// Recommended markers use a 56×40 SVG; pass icon dimensions so the
+					// JS side can set scaledSize / element size correctly.
+					string iconW = isRecommended ? "56" : "48";
+					string iconH = isRecommended ? "40" : "32";
+
+					if (!first) sb.Append(',');
+					first = false;
+					sb.Append($"{{\"lat\":{lat:F6},\"lng\":{lng:F6}," +
+							  $"\"label\":\"{label}\",\"color\":\"{color}\"," +
+							  $"\"icon\":\"{iconUrl}\"," +
+							  $"\"iconW\":{iconW},\"iconH\":{iconH}," +
+							  $"\"type\":\"truck\",\"truckId\":{truck.Id}}}");
+				}
+			}
+
+			// ── Pickup / Delivery markers (only when a job is selected) ──────────
+			var job = vm.SelectedJob;
+			if (job != null)
+			{
+				var pickupCoord = TryGetZoneCoordinate(job.PickupLocation?.Zone)
+							   ?? TryGetZoneCoordinate(job.PickupLocation?.Address)
+							   ?? TryGetZoneCoordinate(job.PickupAddress);
+				if (pickupCoord != null)
+				{
+					if (!first) sb.Append(',');
+					first = false;
+					string lbl = EscapeJs(BuildPickupLabel(job));
+					sb.Append($"{{\"lat\":{pickupCoord.Value.Lat},\"lng\":{pickupCoord.Value.Lng}," +
+							  $"\"label\":\"{lbl}\",\"color\":\"#34A853\",\"type\":\"pickup\"}}");
+				}
+
+				var deliveryCoord = TryGetZoneCoordinate(job.DeliveryLocation?.Zone)
+								 ?? TryGetZoneCoordinate(job.DeliveryLocation?.Address)
+								 ?? TryGetZoneCoordinate(job.DeliveryAddress);
+				if (deliveryCoord != null)
+				{
+					if (!first) sb.Append(',');
+					string lbl = EscapeJs(BuildDeliveryLabel(job));
+					sb.Append($"{{\"lat\":{deliveryCoord.Value.Lat},\"lng\":{deliveryCoord.Value.Lng}," +
+							  $"\"label\":\"{lbl}\",\"color\":\"#EA4335\",\"type\":\"delivery\"}}");
+				}
+			}
+
+			sb.Append(']');
+			return sb.ToString();
+		}
+
+		/// <summary>
+		/// Builds the JSON object that describes the straight-line route preview for the
+		/// selected job.  Returns the string "null" when no job is selected or when
+		/// neither pickup nor delivery coordinates can be resolved.
+		///
+		/// Truck source priority:
+		///   1. vm.StagedTruck   — isStaged:true  (draws stronger dashed line)
+		///   2. PickRecommendedTruck() — isStaged:false
+		///   3. None             — truckToPickup leg is omitted
+		///
+		/// These are straight-line visual previews only.  No Directions/Routes API.
+		/// </summary>
+		private static string BuildRoutePreviewJson(MainViewModel vm)
+		{
+			var job = vm.SelectedJob;
+			if (job == null) return "null";
+
+			var pickupCoord = TryGetZoneCoordinate(job.PickupLocation?.Zone)
+						   ?? TryGetZoneCoordinate(job.PickupLocation?.Address)
+						   ?? TryGetZoneCoordinate(job.PickupAddress);
+
+			var deliveryCoord = TryGetZoneCoordinate(job.DeliveryLocation?.Zone)
+							 ?? TryGetZoneCoordinate(job.DeliveryLocation?.Address)
+							 ?? TryGetZoneCoordinate(job.DeliveryAddress);
+
+			// Resolve which truck to draw the deadhead leg from
+			Truck? routeTruck  = vm.StagedTruck ?? PickRecommendedTruck(job, vm.AvailableTrucks);
+			bool   isStaged    = vm.StagedTruck != null;
+			var    truckCoord  = routeTruck != null ? TryGetZoneCoordinate(routeTruck.CurrentLocation) : null;
+
+			// Need at least one leg to produce a non-null result
+			if (pickupCoord == null && deliveryCoord == null) return "null";
+
+			var sb = new StringBuilder("{");
+			bool first = true;
+
+			// truck→pickup leg (only when truck coord AND pickup coord are both known)
+			if (truckCoord != null && pickupCoord != null)
+			{
+				sb.Append($"\"truckToPickup\":"
+					   + $"{{\"fromLat\":{truckCoord.Value.Lat:F6},\"fromLng\":{truckCoord.Value.Lng:F6},"
+					   + $"\"toLat\":{pickupCoord.Value.Lat:F6},\"toLng\":{pickupCoord.Value.Lng:F6},"
+					   + $"\"isStaged\":{(isStaged ? "true" : "false")}}}");
+				first = false;
+			}
+
+			// pickup→delivery leg (only when both coords are known)
+			if (pickupCoord != null && deliveryCoord != null)
+			{
+				if (!first) sb.Append(',');
+				sb.Append($"\"pickupToDelivery\":"
+					   + $"{{\"fromLat\":{pickupCoord.Value.Lat:F6},\"fromLng\":{pickupCoord.Value.Lng:F6},"
+					   + $"\"toLat\":{deliveryCoord.Value.Lat:F6},\"toLng\":{deliveryCoord.Value.Lng:F6}}}");
+			}
+
+			sb.Append('}');
+			return sb.ToString();
+		}
+
+
+        // ── Vehicle marker icon ─────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Returns a data URL containing an inline SVG vehicle silhouette.
+        /// Shape is chosen from VehicleType; fill color comes from status.
+        /// When isRecommended is true the viewBox is enlarged to 56×40 and an
+        /// orange ellipse halo ring is drawn behind the vehicle to identify it
+        /// as the map's top recommended truck for the selected job.
+        /// </summary>
+        private static string GetVehicleMarkerSvg(Truck truck, string color, bool isRecommended = false)
+        {
+            string svgBody = GetVehicleSvgBody(truck?.VehicleType);
+
+            string svg;
+            if (isRecommended)
+            {
+                // Enlarged canvas: 56 wide × 40 tall.
+                // Vehicle shapes are authored in a 48×32 space; offset them by (4,4)
+                // so they sit centred inside the larger viewBox, leaving room for the ring.
+                svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 56 40' width='56' height='40'>"
+                    // Outer glow ring — drawn first so it sits behind the vehicle
+                    + "<ellipse cx='28' cy='20' rx='26' ry='16' fill='none' stroke='%23FFA500' stroke-width='3' opacity='0.92'/>"
+                    // Inner ring for depth
+                    + "<ellipse cx='28' cy='20' rx='22' ry='13' fill='none' stroke='%23FFD700' stroke-width='1.2' opacity='0.55'/>"
+                    // Vehicle group — translated 4px right, 4px down to centre in larger canvas
+                    + $"<g transform='translate(4,4)' fill='{color}' stroke='%23ffffff' stroke-width='0.8' stroke-linejoin='round'>"
+                    + svgBody
+                    + "</g></svg>";
+            }
+            else
+            {
+                // Standard 48×32 canvas
+                svg = $"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 32' width='48' height='32'>"
+                    + $"<g fill='{color}' stroke='%23ffffff' stroke-width='0.8' stroke-linejoin='round'>"
+                    + svgBody
+                    + "</g></svg>";
+            }
+
+            // data URLs don't need the SVG encoded when the content is ASCII-safe;
+            // percent-encode only the chars that break URL parsing.
+            string encoded = svg.Replace("#", "%23").Replace("'", "%27");
+
+            return "data:image/svg+xml," + encoded;
         }
 
         /// <summary>
-        /// Marker creation JS using AdvancedMarkerElement (requires a valid Map ID).
-        /// Truck markers post a WebView2 message so the host can set SelectedTruck.
+        /// Returns the inner SVG path/rect elements that form the vehicle silhouette.
+        /// Coordinate space: 48 wide × 32 tall. Wheel circles are drawn last so they
+        /// appear on top of the body fill.
         /// </summary>
-        private static string BuildAdvancedMarkerJs() => @"
-  const { AdvancedMarkerElement } = await google.maps.importLibrary('marker');
+        private static string GetVehicleSvgBody(string? vehicleType)
+        {
+            string t = vehicleType?.Trim() ?? string.Empty;
 
-  markers.forEach(function(m) {
-    const pin = document.createElement('div');
-    pin.style.cssText = [
-      'background:' + m.color,
-      'color:#fff',
-      'border-radius:6px',
-      'padding:4px 8px',
-      'font:bold 11px/1.3 sans-serif',
-      'max-width:180px',
-      'white-space:pre-wrap',
-      'word-break:break-word',
-      'box-shadow:0 2px 6px rgba(0,0,0,.5)',
-      'cursor:pointer',
-    ].join(';');
-    pin.textContent = m.label;
+            // Van / Cargo Van — rounded, tall-nosed panel-van profile
+            if (t.Contains("Van", StringComparison.OrdinalIgnoreCase))
+                return
+                    // body + cab
+                    "<rect x='1' y='8' width='42' height='16' rx='3'/>"
+                    // windscreen notch
+                    + "<rect x='33' y='10' width='8' height='7' rx='1' fill='%23ffffff66' stroke='none'/>"
+                    // bumper
+                    + "<rect x='39' y='20' width='5' height='3' rx='1'/>"
+                    // rear panel
+                    + "<rect x='2' y='9' width='4' height='14' rx='1'/>"
+                    // wheels
+                    + "<circle cx='10' cy='26' r='4' stroke-width='1'/>"
+                    + "<circle cx='36' cy='26' r='4' stroke-width='1'/>"
+                    + "<circle cx='10' cy='26' r='1.5' fill='%23ffffff88' stroke='none'/>"
+                    + "<circle cx='36' cy='26' r='1.5' fill='%23ffffff88' stroke='none'/>"
+                    // rear door line
+                    + "<line x1='8' y1='8' x2='8' y2='24' stroke='%23ffffff55' stroke-width='0.7'/>";
 
-    const marker = new AdvancedMarkerElement({
-      map: map,
-      position: { lat: m.lat, lng: m.lng },
-      content: pin,
-      title: m.label,
-    });
+            // Box Truck — tall square cargo box, short cab in front
+            if (t.Contains("Box", StringComparison.OrdinalIgnoreCase))
+                return
+                    // cargo box
+                    "<rect x='1' y='5' width='28' height='19' rx='1'/>"
+                    // cab
+                    + "<path d='M29 12 L29 24 L44 24 L44 14 L38 12 Z'/>"
+                    // cab windscreen
+                    + "<path d='M31 13 L37.5 13 L43 15 L43 21 L31 21 Z' fill='%23ffffff55' stroke='none'/>"
+                    // bumper
+                    + "<rect x='40' y='22' width='5' height='3' rx='1'/>"
+                    // box door line
+                    + "<line x1='28' y1='5' x2='28' y2='24' stroke='%23ffffff55' stroke-width='0.8'/>"
+                    // wheels
+                    + "<circle cx='9' cy='26' r='4' stroke-width='1'/>"
+                    + "<circle cx='37' cy='26' r='4' stroke-width='1'/>"
+                    + "<circle cx='9' cy='26' r='1.5' fill='%23ffffff88' stroke='none'/>"
+                    + "<circle cx='37' cy='26' r='1.5' fill='%23ffffff88' stroke='none'/>";
 
-    const info = new google.maps.InfoWindow({
-      content: '<div style=""font:13px sans-serif;white-space:pre-wrap;max-width:260px"">' + m.label.replace(/\n/g,'<br>') + '</div>'
-    });
-    marker.addListener('click', function() {
-      info.open({ anchor: marker, map });
-      if (m.type === 'truck' && window.chrome && chrome.webview) {
-        chrome.webview.postMessage({ type: 'truckClicked', truckId: m.truckId });
-      }
-    });
-  });
-";
+            // Flatbed — low, long flat deck; compact cab
+            if (t.Contains("Flatbed", StringComparison.OrdinalIgnoreCase))
+                return
+                    // flat deck
+                    "<rect x='1' y='18' width='42' height='5' rx='1'/>"
+                    // cab
+                    + "<path d='M26 10 L26 18 L44 18 L44 12 L38 10 Z'/>"
+                    // cab windscreen
+                    + "<path d='M28 11 L37 11 L43 13 L43 17 L28 17 Z' fill='%23ffffff55' stroke='none'/>"
+                    // bumper
+                    + "<rect x='40' y='21' width='5' height='2' rx='1'/>"
+                    // stake posts
+                    + "<rect x='4'  y='14' width='1.5' height='4'/>"
+                    + "<rect x='12' y='14' width='1.5' height='4'/>"
+                    + "<rect x='20' y='14' width='1.5' height='4'/>"
+                    // wheels
+                    + "<circle cx='9'  cy='26' r='4' stroke-width='1'/>"
+                    + "<circle cx='37' cy='26' r='4' stroke-width='1'/>"
+                    + "<circle cx='9'  cy='26' r='1.5' fill='%23ffffff88' stroke='none'/>"
+                    + "<circle cx='37' cy='26' r='1.5' fill='%23ffffff88' stroke='none'/>";
 
-        /// <summary>
-        /// Marker creation JS using the legacy google.maps.Marker (no Map ID required).
-        /// Truck markers post a WebView2 message so the host can set SelectedTruck.
-        /// </summary>
-        private static string BuildLegacyMarkerJs() => @"
-  markers.forEach(function(m) {
-    // Pin icon colour via SVG path
-    const svgIcon = {
-      path: google.maps.SymbolPath.CIRCLE,
-      scale: 10,
-      fillColor: m.color,
-      fillOpacity: 1,
-      strokeColor: '#ffffff',
-      strokeWeight: 2,
-    };
-
-    const marker = new google.maps.Marker({
-      map: map,
-      position: { lat: m.lat, lng: m.lng },
-      icon: svgIcon,
-      title: m.label,
-    });
-
-    const infoContent = '<div style=""font:13px sans-serif;white-space:pre-wrap;max-width:260px;padding:4px"">'
-                      + m.label.replace(/\n/g,'<br>') + '</div>';
-    const info = new google.maps.InfoWindow({ content: infoContent });
-    marker.addListener('click', function() {
-      info.open(map, marker);
-      if (m.type === 'truck' && window.chrome && chrome.webview) {
-        chrome.webview.postMessage({ type: 'truckClicked', truckId: m.truckId });
-      }
-    });
-  });
-";
+            // Generic Truck / Truck / unknown — classic cab-over with medium trailer
+            return
+                // trailer
+                "<rect x='1' y='9' width='28' height='15' rx='1'/>"
+                // cab
+                + "<path d='M29 11 L29 24 L44 24 L44 13 L39 11 Z'/>"
+                // cab windscreen
+                + "<path d='M31 12 L38 12 L43 14 L43 21 L31 21 Z' fill='%23ffffff55' stroke='none'/>"
+                // bumper
+                + "<rect x='40' y='22' width='5' height='3' rx='1'/>"
+                // connector
+                + "<rect x='27' y='15' width='4' height='3' rx='0.5'/>"
+                // wheels — rear dual
+                + "<circle cx='8'  cy='26' r='4' stroke-width='1'/>"
+                + "<circle cx='17' cy='26' r='4' stroke-width='1'/>"
+                + "<circle cx='37' cy='26' r='4' stroke-width='1'/>"
+                + "<circle cx='8'  cy='26' r='1.5' fill='%23ffffff88' stroke='none'/>"
+                + "<circle cx='17' cy='26' r='1.5' fill='%23ffffff88' stroke='none'/>"
+                + "<circle cx='37' cy='26' r='1.5' fill='%23ffffff88' stroke='none'/>";
+        }
 
         // ── Label builders ────────────────────────────────────────────────────────
 

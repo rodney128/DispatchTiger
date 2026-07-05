@@ -7,6 +7,7 @@ using System.Windows.Media;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 using DispatchTiger.Models;
+using DispatchTiger.Services;
 using DispatchTiger.ViewModels;
 
 namespace DispatchTiger.Views
@@ -595,7 +596,7 @@ namespace DispatchTiger.Views
                     };
                 })
                 // Phase 2: sort — best fit first, then earliest AvailableAt, then plate
-                .OrderBy(c => GetOverallFitSortRank(c.FitLabel))
+                .OrderBy(c => DispatchFitService.GetOverallFitSortRank(c.FitLabel))
                 .ThenBy(c  => c.Truck.AvailableAt ?? DateTime.MaxValue)
                 .ThenBy(c  => c.Truck.PlateNumber, StringComparer.OrdinalIgnoreCase)
                 .ToList();
@@ -1006,69 +1007,19 @@ namespace DispatchTiger.Views
         /// </summary>
         private static (string Label, Color Color, string? Detail) GetTimeFit(Job job, Truck truck)
         {
-            var green  = Color.FromRgb( 76, 175,  80);
-            var orange = Color.FromRgb(255, 152,   0);
-            var red    = Color.FromRgb(255,  92,  53);
-
-            // ── data-availability guards (rules 1-10) ───────────────────────
-            if (!truck.IsAvailable)
-                return ("Blocked", red, null);
-            if (!job.PickupWindowStart.HasValue || !job.PickupWindowEnd.HasValue)
-                return ("Missing pickup window", orange, null);
-            if (!job.DeliveryWindowStart.HasValue || !job.DeliveryWindowEnd.HasValue)
-                return ("Missing delivery window", orange, null);
-            if (!job.EstimatedPickupMinutes.HasValue)
-                return ("Missing pickup duration", orange, null);
-            if (!job.EstimatedDeliveryMinutes.HasValue)
-                return ("Missing delivery duration", orange, null);
-            if (!truck.AvailableAt.HasValue)
-                return ("Missing truck availability", orange, null);
-            if (string.IsNullOrWhiteSpace(truck.CurrentLocation))
-                return ("Missing truck location", orange, null);
-            if (string.IsNullOrWhiteSpace(job.PickupAddress))
-                return ("Missing pickup address", orange, null);
-            if (string.IsNullOrWhiteSpace(job.DeliveryAddress))
-                return ("Missing delivery address", orange, null);
-
-            int? toPickupMin   = EstimateTravelMinutes(truck.CurrentLocation, job.PickupAddress);
-            int? toDeliveryMin = EstimateTravelMinutes(job.PickupAddress,     job.DeliveryAddress);
-
-            if (!toPickupMin.HasValue || !toDeliveryMin.HasValue)
-                return ("Route estimate missing", orange, null);
-
-            // ── timing calculation ───────────────────────────────────────────
-            var pickupArrival   = truck.AvailableAt.Value.AddMinutes(toPickupMin.Value);
-            var pickupSlack     = job.PickupWindowEnd!.Value  - pickupArrival;
-            var pickupComplete  = pickupArrival.AddMinutes(job.EstimatedPickupMinutes!.Value);
-            var deliveryArrival = pickupComplete.AddMinutes(toDeliveryMin.Value);
-            var deliverySlack   = job.DeliveryWindowEnd!.Value - deliveryArrival;
-
-            // ── feasibility labels (rules 11-15) ────────────────────────────
-            string detail = $"pickup slack {FormatSlack(pickupSlack)}; delivery slack {FormatSlack(deliverySlack)}";
-
-            if (pickupSlack < TimeSpan.Zero)
-                return ($"Late pickup by {FormatLate(pickupSlack)}", red, detail);
-            if (deliverySlack < TimeSpan.Zero)
-                return ($"Late delivery by {FormatLate(deliverySlack)}", red, detail);
-            if (pickupSlack <= TimeSpan.FromMinutes(20))
-                return ("Tight pickup", orange, detail);
-            if (deliverySlack <= TimeSpan.FromMinutes(20))
-                return ("Tight delivery", orange, detail);
-
-            return ("Good", green, detail);
+            var (label, detail) = DispatchFitService.GetTimeFit(job, truck);
+            return (label, TimeFitColor(label), detail);
         }
 
-        /// <summary>Formats a positive slack TimeSpan as e.g. "45 min" or "1h 20m".</summary>
-        private static string FormatSlack(TimeSpan slack)
+        private static Color TimeFitColor(string label) => label switch
         {
-            var abs = slack.Duration();
-            return abs.TotalHours >= 1
-                ? $"{(int)abs.TotalHours}h {abs.Minutes}m"
-                : $"{(int)abs.TotalMinutes} min";
-        }
-
-        /// <summary>Formats the magnitude of a negative slack TimeSpan as e.g. "12 min".</summary>
-        private static string FormatLate(TimeSpan negativeSlack) => FormatSlack(negativeSlack);
+            "Good"    => Color.FromRgb( 76, 175,  80),
+            "Blocked" => Color.FromRgb(255,  92,  53),
+            _  when label.StartsWith("Late ",    StringComparison.Ordinal) => Color.FromRgb(255,  92,  53),
+            _  when label.StartsWith("Tight",   StringComparison.Ordinal) => Color.FromRgb(255, 152,   0),
+            _  when label.StartsWith("Missing", StringComparison.Ordinal) => Color.FromRgb(255, 152,   0),
+            _  => Color.FromRgb(255, 152, 0)
+        };
 
         /// <summary>
         /// Judges basic route efficiency for a job/truck pair using deadhead vs loaded distance.
@@ -1077,43 +1028,19 @@ namespace DispatchTiger.Views
         /// </summary>
         private static (string Label, Color Color, string? Detail) GetRouteFit(Job job, Truck truck)
         {
-            var green    = Color.FromRgb( 76, 175,  80);
-            var orange   = Color.FromRgb(255, 152,   0);
-            var muted    = Color.FromRgb(140, 140, 140);
-            var red      = Color.FromRgb(255,  92,  53);
-
-            // ── data-availability guards ───────────────────────────────────────
-            if (!truck.IsAvailable)
-                return ("Blocked", red, null);
-            if (string.IsNullOrWhiteSpace(truck.CurrentLocation))
-                return ("Missing truck location", orange, null);
-            if (string.IsNullOrWhiteSpace(job.PickupAddress))
-                return ("Missing pickup address", orange, null);
-            if (string.IsNullOrWhiteSpace(job.DeliveryAddress))
-                return ("Missing delivery address", orange, null);
-
-            int? deadheadMin = EstimateTravelMinutes(truck.CurrentLocation, job.PickupAddress);
-            int? loadedMin   = EstimateTravelMinutes(job.PickupAddress,     job.DeliveryAddress);
-
-            if (!deadheadMin.HasValue || !loadedMin.HasValue)
-                return ("Route estimate missing", orange, null);
-
-            int total = deadheadMin.Value + loadedMin.Value;
-            if (total <= 0)
-                return ("Route estimate missing", orange, null);
-
-            // ── efficiency classification ────────────────────────────────────
-            double ratio   = (double)deadheadMin.Value / total;
-            int    pct     = (int)Math.Round(ratio * 100);
-            string detail  = $"deadhead {deadheadMin} min; loaded {loadedMin} min; empty {pct}%";
-
-            if (ratio >= 0.60)
-                return ("High deadhead", orange, detail);
-            if (ratio >= 0.40)
-                return ("Acceptable", muted, detail);
-
-            return ("Efficient", green, detail);
+            var (label, detail) = DispatchFitService.GetRouteFit(job, truck);
+            return (label, RouteFitColor(label), detail);
         }
+
+        private static Color RouteFitColor(string label) => label switch
+        {
+            "Efficient"     => Color.FromRgb( 76, 175,  80),
+            "Acceptable"    => Color.FromRgb(140, 140, 140),
+            "Blocked"       => Color.FromRgb(255,  92,  53),
+            "High deadhead" => Color.FromRgb(255, 152,   0),
+            _ when label.StartsWith("Missing", StringComparison.Ordinal) => Color.FromRgb(255, 152, 0),
+            _               => Color.FromRgb(255, 152,   0)
+        };
 
         /// <summary>
         /// Combines Time Fit, Route Fit, and Equipment Fit into a single overall dispatch recommendation.
@@ -1122,67 +1049,28 @@ namespace DispatchTiger.Views
         private static (string Label, Color Color) GetOverallFit(
             Truck truck, string timeFitLabel, string routeFitLabel, string equipmentFitLabel)
         {
-            var green  = Color.FromRgb( 76, 175,  80);
-            var orange = Color.FromRgb(255, 152,   0);
-            var muted  = Color.FromRgb(140, 140, 140);
-            var red    = Color.FromRgb(255,  92,  53);
-
-            // Rule 0: equipment mismatch makes the job impossible for this truck
-            if (equipmentFitLabel == "Mismatch")
-                return ("Blocked", red);
-
-            // Rule 1: truck is physically unavailable
-            if (!truck.IsAvailable)
-                return ("Blocked", red);
-
-            // Rule 2: timing makes the job impossible
-            if (timeFitLabel.StartsWith("Late ", StringComparison.Ordinal))
-                return ("Blocked", red);
-
-            // Rule 3: required job timing data is absent
-            if (timeFitLabel.StartsWith("Missing", StringComparison.Ordinal))
-                return ("Unknown", orange);
-
-            // Rule 4: required route data is absent
-            if (routeFitLabel.StartsWith("Missing", StringComparison.Ordinal) ||
-                routeFitLabel == "Route estimate missing")
-                return ("Unknown", orange);
-
-            // Rule 5: timing is feasible but very tight
-            if (timeFitLabel is "Tight pickup" or "Tight delivery")
-                return ("Risky", orange);
-
-            // Rules 6-8: Good timing — differentiate by route efficiency
-            if (timeFitLabel == "Good")
-            {
-                return routeFitLabel switch
-                {
-                    "Efficient"    => ("Best",  green),
-                    "Acceptable"   => ("Good",  green),
-                    "High deadhead"=> ("Poor",  orange),
-                    _              => ("Candidate", muted)
-                };
-            }
-
-            // Rule 9: fallback
-            return ("Candidate", muted);
+            string label = DispatchFitService.GetOverallFit(truck, timeFitLabel, routeFitLabel, equipmentFitLabel);
+            return (label, OverallFitColor(label));
         }
+
+        private static Color OverallFitColor(string label) => label switch
+        {
+            "Best"      => Color.FromRgb( 76, 175,  80),
+            "Good"      => Color.FromRgb( 76, 175,  80),
+            "Risky"     => Color.FromRgb(255, 152,   0),
+            "Poor"      => Color.FromRgb(255, 152,   0),
+            "Candidate" => Color.FromRgb(140, 140, 140),
+            "Unknown"   => Color.FromRgb(255, 152,   0),
+            "Blocked"   => Color.FromRgb(255,  92,  53),
+            _           => Color.FromRgb(140, 140, 140)
+        };
 
         /// <summary>
         /// Returns a sort rank for an Overall Fit label so candidates are displayed
         /// best-first. Lower rank = displayed higher in the list.
         /// </summary>
-        private static int GetOverallFitSortRank(string fitLabel) => fitLabel switch
-        {
-            "Best"      => 0,
-            "Good"      => 1,
-            "Risky"     => 2,
-            "Candidate" => 3,
-            "Poor"      => 4,
-            "Unknown"   => 5,
-            "Blocked"   => 6,
-            _           => 99
-        };
+        private static int GetOverallFitSortRank(string fitLabel)
+            => DispatchFitService.GetOverallFitSortRank(fitLabel);
 
         /// <summary>
         /// Compares Job.RequiredEquipment against Truck.VehicleType (case-insensitive).
@@ -1190,83 +1078,17 @@ namespace DispatchTiger.Views
         /// </summary>
         private static (string Label, Color Color, string? Reason) GetEquipmentFit(Job job, Truck truck)
         {
-            var green  = Color.FromRgb( 76, 175,  80);
-            var orange = Color.FromRgb(255, 152,   0);
-            var muted  = Color.FromRgb(140, 140, 140);
-            var red    = Color.FromRgb(255,  92,  53);
-
-            if (string.IsNullOrWhiteSpace(job.RequiredEquipment))
-                return ("Not specified", muted, null);
-
-            if (string.IsNullOrWhiteSpace(truck.VehicleType))
-                return ("Truck type unknown", orange, $"Requires {job.RequiredEquipment}");
-
-            if (truck.VehicleType.Equals(job.RequiredEquipment, StringComparison.OrdinalIgnoreCase))
-                return ("Match", green, $"Equipment match: {job.RequiredEquipment}");
-
-            return ("Mismatch", red,
-                $"Equipment mismatch: requires {job.RequiredEquipment}, truck is {truck.VehicleType}");
+            var (label, reason) = DispatchFitService.GetEquipmentFit(job, truck);
+            return (label, EquipmentFitColor(label), reason);
         }
 
-        /// <summary>
-        /// Returns a rough travel-time estimate in minutes between two zone strings.
-        /// Zones are identified by case-insensitive substring match against known area names.
-        /// Returns null when either location cannot be matched to a known zone.
-        /// Same-zone trips return 10 minutes. The table is symmetric.
-        /// </summary>
-        private static int? EstimateTravelMinutes(string? from, string? to)
+        private static Color EquipmentFitColor(string label) => label switch
         {
-            if (string.IsNullOrWhiteSpace(from) || string.IsNullOrWhiteSpace(to))
-                return null;
-
-            static string? MatchZone(string text)
-            {
-                string[] zones = ["Sidney", "Victoria", "Langford", "Nanaimo", "Duncan",
-                                  "Saanich", "Colwood", "Oak Bay", "Esquimalt", "Sooke"];
-                foreach (var zone in zones)
-                    if (text.Contains(zone, StringComparison.OrdinalIgnoreCase))
-                        return zone;
-                return null;
-            }
-
-            var fromZone = MatchZone(from);
-            var toZone   = MatchZone(to);
-
-            if (fromZone is null || toZone is null)
-                return null;
-            if (fromZone == toZone)
-                return 10;
-
-            // Canonical key: alphabetical order so the table is symmetric
-            string key = string.Compare(fromZone, toZone, StringComparison.Ordinal) < 0
-                ? $"{fromZone}|{toZone}"
-                : $"{toZone}|{fromZone}";
-
-            return key switch
-            {
-                "Sidney|Victoria"     => 35,
-                "Langford|Sidney"     => 45,
-                "Saanich|Sidney"      => 25,
-                "Langford|Victoria"   => 25,
-                "Saanich|Victoria"    => 15,
-                "Esquimalt|Victoria"  => 10,
-                "Oak Bay|Victoria"    => 15,
-                "Colwood|Langford"    => 10,
-                "Langford|Sooke"      => 35,
-                "Duncan|Nanaimo"      => 40,
-                "Duncan|Victoria"     => 60,
-                "Nanaimo|Victoria"    => 95,
-                "Nanaimo|Sidney"      => 85,
-                "Colwood|Victoria"    => 20,
-                "Esquimalt|Langford"  => 20,
-                "Duncan|Saanich"      => 55,
-                "Duncan|Langford"     => 50,
-                "Colwood|Sooke"       => 30,
-                "Oak Bay|Saanich"     => 15,
-                "Esquimalt|Oak Bay"   => 20,
-                _                     => null
-            };
-        }
+            "Match"            => Color.FromRgb( 76, 175,  80),
+            "Mismatch"         => Color.FromRgb(255,  92,  53),
+            "Truck type unknown"=> Color.FromRgb(255, 152,   0),
+            _                  => Color.FromRgb(140, 140, 140)
+        };
 
         private void StartCurrentTimeMarker()
         {
