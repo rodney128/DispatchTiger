@@ -11,6 +11,7 @@ namespace DispatchTiger
     public partial class MainWindow : Window
     {
         private MainViewModel? _viewModel;
+        private MapView? _activeMapView;
         private double _currentZoom = 1.0; // Default zoom level: 100%
         private const double MinZoom = 0.60;  // Minimum: 60%
         private const double MaxZoom = 2.0;   // Maximum: 200%
@@ -77,12 +78,26 @@ namespace DispatchTiger
             ShowMonthView();
         }
 
+        private void MapViewTab_Click(object sender, RoutedEventArgs e)
+        {
+            ShowMapView();
+        }
+
+        // Resets all tab buttons to the inactive style, then the caller highlights its own.
+        private void ResetAllTabStyles()
+        {
+            var inactive = System.Windows.Media.Brushes.Transparent;
+            var inactiveFg = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(102, 102, 102));
+            DayViewTab.BorderBrush   = inactive;   DayViewTab.Foreground   = inactiveFg;
+            MonthViewTab.BorderBrush = inactive;   MonthViewTab.Foreground = inactiveFg;
+            MapViewTab.BorderBrush   = inactive;   MapViewTab.Foreground   = inactiveFg;
+        }
+
         private void ShowDayView()
         {
+            _activeMapView = null;
             if (_viewModel != null)
-            {
                 _viewModel.CurrentView = "Day";
-            }
 
             var dayView = new DayView { DataContext = _viewModel };
             ViewContent.Content = dayView;
@@ -98,20 +113,16 @@ namespace DispatchTiger
                 _currentScaleTransform.ScaleY = 1.0;
             }
 
-            // Update tab styling
+            ResetAllTabStyles();
             DayViewTab.BorderBrush = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 120, 212));
-            DayViewTab.Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 120, 212));
-
-            MonthViewTab.BorderBrush = System.Windows.Media.Brushes.Transparent;
-            MonthViewTab.Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(102, 102, 102));
+            DayViewTab.Foreground  = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 120, 212));
         }
 
         private void ShowMonthView()
         {
+            _activeMapView = null;
             if (_viewModel != null)
-            {
                 _viewModel.CurrentView = "Month";
-            }
 
             var monthView = new MonthView { DataContext = _viewModel };
             ViewContent.Content = monthView;
@@ -127,12 +138,29 @@ namespace DispatchTiger
                 _currentScaleTransform.ScaleY = 1.0;
             }
 
-            // Update tab styling
+            ResetAllTabStyles();
             MonthViewTab.BorderBrush = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 120, 212));
-            MonthViewTab.Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 120, 212));
+            MonthViewTab.Foreground  = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 120, 212));
+        }
 
-            DayViewTab.BorderBrush = System.Windows.Media.Brushes.Transparent;
-            DayViewTab.Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(102, 102, 102));
+        private void ShowMapView()
+        {
+            if (_viewModel != null)
+                _viewModel.CurrentView = "Map";
+
+            // No zoom/scale for Map View
+            _currentScaleTransform = null;
+            _currentZoom = 1.0;
+
+            var mapView = new MapView { DataContext = _viewModel };
+            if (_viewModel != null)
+                mapView.SetViewModel(_viewModel);
+            _activeMapView = mapView;
+            ViewContent.Content = mapView;
+
+            ResetAllTabStyles();
+            MapViewTab.BorderBrush = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 120, 212));
+            MapViewTab.Foreground  = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 120, 212));
         }
 
         private void JobBorder_MouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
@@ -140,6 +168,8 @@ namespace DispatchTiger
             if (sender is Border border && border.DataContext is Job job && _viewModel != null)
             {
                 _viewModel.SelectedJob = job;
+                // MapView subscribes to PropertyChanged and self-refreshes;
+                // no extra call needed here.
             }
         }
     }
