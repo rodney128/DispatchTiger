@@ -1,4 +1,4 @@
-﻿<UserControl x:Class="DispatchTiger.Views.MapView"
+<UserControl x:Class="DispatchTiger.Views.MapView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
@@ -34,6 +34,11 @@
                                Text="Selected truck: none"
                                Foreground="#AAAAAA"
                                FontSize="11"/>
+                    <TextBlock x:Name="MapFitLegendText"
+                               Text=""
+                               Foreground="#888888"
+                               FontSize="10"
+                               Visibility="Collapsed"/>
                 </StackPanel>
             </DockPanel>
         </Border>
@@ -44,36 +49,210 @@
                       HorizontalAlignment="Stretch"
                       VerticalAlignment="Stretch"/>
 
-        <!-- Fallback: shown over the WebView2 when API key is missing -->
+        <!-- Setup Guide: shown over WebView2 when API key is missing -->
         <Border Grid.Row="1"
                 Name="MissingKeyOverlay"
                 Background="#1A1A1A"
                 Visibility="Collapsed">
-            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="480">
-                <TextBlock Text="ðŸ—º"
-                           FontSize="48"
-                           HorizontalAlignment="Center"
-                           Margin="0,0,0,12"/>
-                <TextBlock Text="Google Maps API key missing"
-                           FontSize="18"
-                           FontWeight="SemiBold"
-                           Foreground="#F28C28"
-                           HorizontalAlignment="Center"
-                           Margin="0,0,0,8"/>
-                <TextBlock Text="Set the GOOGLE_MAPS_API_KEY environment variable to enable the live map."
-                           FontSize="13"
-                           Foreground="#AAAAAA"
-                           TextWrapping="Wrap"
-                           HorizontalAlignment="Center"
-                           TextAlignment="Center"
-                           Margin="0,0,0,16"/>
-                <TextBlock Text="Truck locations and job pickup / delivery zones are still available via the Day View candidate panel."
-                           FontSize="11"
-                           Foreground="#666666"
-                           TextWrapping="Wrap"
-                           HorizontalAlignment="Center"
-                           TextAlignment="Center"/>
-            </StackPanel>
+            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+                <StackPanel HorizontalAlignment="Center"
+                            VerticalAlignment="Top"
+                            MaxWidth="560"
+                            Margin="24,32,24,32">
+
+                    <!-- Title -->
+                    <TextBlock Text="&#x1F5FA;"
+                               FontSize="44"
+                               HorizontalAlignment="Center"
+                               Margin="0,0,0,10"/>
+                    <TextBlock Text="Google Maps setup required"
+                               FontSize="20"
+                               FontWeight="SemiBold"
+                               Foreground="#F28C28"
+                               HorizontalAlignment="Center"
+                               Margin="0,0,0,12"/>
+
+                    <!-- Description -->
+                    <TextBlock Text="DispatchTiger uses Google Maps to show trucks, pickup locations, and delivery locations. To enable the live map, create a Google Maps API key and save it on this computer."
+                               FontSize="13"
+                               Foreground="#CCCCCC"
+                               TextWrapping="Wrap"
+                               HorizontalAlignment="Center"
+                               TextAlignment="Center"
+                               Margin="0,0,0,20"/>
+
+                    <!-- Setup status line -->
+                    <Border Background="#252525" CornerRadius="6" Padding="12,8" Margin="0,0,0,20">
+                        <StackPanel>
+                            <TextBlock x:Name="SetupStatusApiKey"
+                                       Text="GOOGLE_MAPS_API_KEY:  checking&#x2026;"
+                                       FontSize="12"
+                                       FontFamily="Consolas"
+                                       Foreground="#AAAAAA"
+                                       Margin="0,0,0,4"/>
+                            <TextBlock x:Name="SetupStatusMapId"
+                                       Text="GOOGLE_MAPS_MAP_ID:   checking&#x2026;"
+                                       FontSize="12"
+                                       FontFamily="Consolas"
+                                       Foreground="#AAAAAA"
+                                       Margin="0,0,0,4"/>
+                            <TextBlock Text="Billing/API status: Cannot be checked locally &#x2014; if the map shows &quot;For development purposes only&quot;, check Google Cloud billing and API enablement."
+                                       FontSize="11"
+                                       Foreground="#666666"
+                                       TextWrapping="Wrap"
+                                       Margin="0,4,0,0"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Setup steps -->
+                    <TextBlock Text="Steps"
+                               FontSize="14"
+                               FontWeight="SemiBold"
+                               Foreground="#DDDDDD"
+                               Margin="0,0,0,8"/>
+                    <StackPanel Margin="0,0,0,20">
+                        <TextBlock Text="1.  Open Google Cloud Console." FontSize="12" Foreground="#AAAAAA" Margin="0,0,0,4" TextWrapping="Wrap"/>
+                        <TextBlock Text="2.  Create or select a project." FontSize="12" Foreground="#AAAAAA" Margin="0,0,0,4" TextWrapping="Wrap"/>
+                        <TextBlock Text="3.  Enable Maps JavaScript API." FontSize="12" Foreground="#AAAAAA" Margin="0,0,0,4" TextWrapping="Wrap"/>
+                        <TextBlock Text="4.  Create an API key." FontSize="12" Foreground="#AAAAAA" Margin="0,0,0,4" TextWrapping="Wrap"/>
+                        <TextBlock Text="5.  Restrict the key to Maps JavaScript API." FontSize="12" Foreground="#AAAAAA" Margin="0,0,0,4" TextWrapping="Wrap"/>
+                        <TextBlock Text="6.  Set the Windows environment variable GOOGLE_MAPS_API_KEY." FontSize="12" Foreground="#AAAAAA" Margin="0,0,0,4" TextWrapping="Wrap"/>
+                        <TextBlock Text="7.  Restart Visual Studio / DispatchTiger." FontSize="12" Foreground="#AAAAAA" TextWrapping="Wrap"/>
+                    </StackPanel>
+
+                    <!-- API key command -->
+                    <TextBlock Text="Set the environment variable (run in Command Prompt or PowerShell as your user account):"
+                               FontSize="12"
+                               Foreground="#888888"
+                               TextWrapping="Wrap"
+                               Margin="0,0,0,6"/>
+                    <Border Background="#1C2A1C" BorderBrush="#3A5A3A" BorderThickness="1" CornerRadius="4" Padding="10,6" Margin="0,0,0,4">
+                        <TextBlock Text="setx GOOGLE_MAPS_API_KEY &quot;PASTE_YOUR_KEY_HERE&quot;"
+                                   FontFamily="Consolas"
+                                   FontSize="12"
+                                   Foreground="#7EC67E"
+                                   TextWrapping="Wrap"/>
+                    </Border>
+                    <Button Name="CopyApiKeyCommandButton"
+                            Content="&#x2398;  Copy API key command"
+                            Click="CopyApiKeyCommand_Click"
+                            HorizontalAlignment="Left"
+                            Padding="10,4"
+                            Margin="0,4,0,16"
+                            FontSize="12"
+                            Foreground="#7EC67E"
+                            Background="Transparent"
+                            BorderBrush="#3A5A3A"
+                            BorderThickness="1"
+                            Cursor="Hand"/>
+
+                    <!-- Map ID command (optional) -->
+                    <TextBlock Text="Optional &#x2014; set a Cloud Map ID for styled / advanced markers:"
+                               FontSize="12"
+                               Foreground="#888888"
+                               TextWrapping="Wrap"
+                               Margin="0,0,0,6"/>
+                    <Border Background="#1C1C2A" BorderBrush="#3A3A5A" BorderThickness="1" CornerRadius="4" Padding="10,6" Margin="0,0,0,4">
+                        <TextBlock Text="setx GOOGLE_MAPS_MAP_ID &quot;PASTE_MAP_ID_HERE&quot;"
+                                   FontFamily="Consolas"
+                                   FontSize="12"
+                                   Foreground="#7E7EC6"
+                                   TextWrapping="Wrap"/>
+                    </Border>
+                    <Button Name="CopyMapIdCommandButton"
+                            Content="&#x2398;  Copy Map ID command"
+                            Click="CopyMapIdCommand_Click"
+                            HorizontalAlignment="Left"
+                            Padding="10,4"
+                            Margin="0,4,0,24"
+                            FontSize="12"
+                            Foreground="#7E7EC6"
+                            Background="Transparent"
+                            BorderBrush="#3A3A5A"
+                            BorderThickness="1"
+                            Cursor="Hand"/>
+
+                    <!-- Action buttons -->
+                    <WrapPanel Margin="0,0,0,24">
+                        <Button Content="&#x1F310;  Open Google Cloud Console"
+                                Click="OpenCloudConsole_Click"
+                                Padding="10,5"
+                                Margin="0,0,8,8"
+                                FontSize="12"
+                                Foreground="#4A9EF0"
+                                Background="Transparent"
+                                BorderBrush="#2A5A8A"
+                                BorderThickness="1"
+                                Cursor="Hand"/>
+                        <Button Content="&#x1F4D6;  Open Maps JavaScript API docs"
+                                Click="OpenMapsDocs_Click"
+                                Padding="10,5"
+                                Margin="0,0,8,8"
+                                FontSize="12"
+                                Foreground="#4A9EF0"
+                                Background="Transparent"
+                                BorderBrush="#2A5A8A"
+                                BorderThickness="1"
+                                Cursor="Hand"/>
+                        <Button Content="&#x27F3;  Refresh Map"
+                                Click="SetupRefreshMap_Click"
+                                Padding="10,5"
+                                Margin="0,0,0,8"
+                                FontSize="12"
+                                Foreground="#F28C28"
+                                Background="Transparent"
+                                BorderBrush="#F28C28"
+                                BorderThickness="1"
+                                Cursor="Hand"/>
+                    </WrapPanel>
+
+                    <!-- Troubleshooting -->
+                    <Border Background="#252520" BorderBrush="#3A3A2A" BorderThickness="1" CornerRadius="6" Padding="14,10" Margin="0,0,0,16">
+                        <StackPanel>
+                            <TextBlock Text="Troubleshooting &#x2014; map loads but shows &quot;For development purposes only&quot;"
+                                       FontSize="12"
+                                       FontWeight="SemiBold"
+                                       Foreground="#D4C080"
+                                       TextWrapping="Wrap"
+                                       Margin="0,0,0,8"/>
+                            <TextBlock Text="Common causes:"
+                                       FontSize="12"
+                                       Foreground="#AAAAAA"
+                                       Margin="0,0,0,4"/>
+                            <TextBlock Text="&#x2022;  Billing is not enabled on the Google Cloud project."
+                                       FontSize="12"
+                                       Foreground="#888888"
+                                       TextWrapping="Wrap"
+                                       Margin="8,0,0,3"/>
+                            <TextBlock Text="&#x2022;  Maps JavaScript API is not enabled."
+                                       FontSize="12"
+                                       Foreground="#888888"
+                                       TextWrapping="Wrap"
+                                       Margin="8,0,0,3"/>
+                            <TextBlock Text="&#x2022;  API key restrictions do not match a desktop WebView2 app."
+                                       FontSize="12"
+                                       Foreground="#888888"
+                                       TextWrapping="Wrap"
+                                       Margin="8,0,0,3"/>
+                            <TextBlock Text="&#x2022;  The key is invalid or deleted."
+                                       FontSize="12"
+                                       Foreground="#888888"
+                                       TextWrapping="Wrap"
+                                       Margin="8,0,0,0"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Bottom note -->
+                    <TextBlock Text="Truck locations and job pickup / delivery zones are still available via the Day View candidate panel."
+                               FontSize="11"
+                               Foreground="#555555"
+                               TextWrapping="Wrap"
+                               HorizontalAlignment="Center"
+                               TextAlignment="Center"/>
+
+                </StackPanel>
+            </ScrollViewer>
         </Border>
     </Grid>
 </UserControl>

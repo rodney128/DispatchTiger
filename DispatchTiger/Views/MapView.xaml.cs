@@ -1,9 +1,12 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Text;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using DispatchTiger.Models;
+using DispatchTiger.Services;
 using DispatchTiger.ViewModels;
 using Microsoft.Web.WebView2.Core;
 
@@ -68,8 +71,21 @@ namespace DispatchTiger.Views
 
         private async void MapView_Loaded(object sender, RoutedEventArgs e)
         {
-            // Check API key first; show overlay and skip WebView2 init if missing
+            await TryInitializeMapAsync();
+        }
+
+        private void RefreshMapButton_Click(object sender, RoutedEventArgs e)
+        {
+            RefreshMap();
+        }
+
+        // ── Map initialisation ───────────────────────────────────────────────────────────
+
+        private async Task TryInitializeMapAsync()
+        {
             var apiKey = Environment.GetEnvironmentVariable("GOOGLE_MAPS_API_KEY");
+            UpdateSetupStatusLine();
+
             if (string.IsNullOrWhiteSpace(apiKey))
             {
                 MissingKeyOverlay.Visibility = Visibility.Visible;
@@ -77,22 +93,74 @@ namespace DispatchTiger.Views
                 return;
             }
 
-            try
+            MissingKeyOverlay.Visibility = Visibility.Collapsed;
+            MapWebView.Visibility = Visibility.Visible;
+
+            if (!_webViewReady)
             {
-                await MapWebView.EnsureCoreWebView2Async();
-                MapWebView.CoreWebView2.WebMessageReceived += HandleWebMessage;
-                _webViewReady = true;
-                RefreshMap();
+                try
+                {
+                    await MapWebView.EnsureCoreWebView2Async();
+                    MapWebView.CoreWebView2.WebMessageReceived += HandleWebMessage;
+                    _webViewReady = true;
+                }
+                catch (Exception ex)
+                {
+                    MapStatusText.Text = $"WebView2 init failed: {ex.Message}";
+                    return;
+                }
             }
-            catch (Exception ex)
-            {
-                MapStatusText.Text = $"WebView2 init failed: {ex.Message}";
-            }
+
+            RefreshMap();
         }
 
-        private void RefreshMapButton_Click(object sender, RoutedEventArgs e)
+        private void UpdateSetupStatusLine()
         {
-            RefreshMap();
+            var apiKey = Environment.GetEnvironmentVariable("GOOGLE_MAPS_API_KEY");
+            var mapId  = Environment.GetEnvironmentVariable("GOOGLE_MAPS_MAP_ID");
+
+            SetupStatusApiKey.Text = string.IsNullOrWhiteSpace(apiKey)
+                ? "GOOGLE_MAPS_API_KEY:  Missing"
+                : "GOOGLE_MAPS_API_KEY:  Found";
+
+            SetupStatusMapId.Text = string.IsNullOrWhiteSpace(mapId)
+                ? "GOOGLE_MAPS_MAP_ID:   Optional — not set"
+                : "GOOGLE_MAPS_MAP_ID:   Found";
+
+            SetupStatusApiKey.Foreground = string.IsNullOrWhiteSpace(apiKey)
+                ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(200, 80, 80))
+                : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(126, 198, 126));
+
+            SetupStatusMapId.Foreground = string.IsNullOrWhiteSpace(mapId)
+                ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(102, 102, 102))
+                : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(126, 126, 198));
+        }
+
+        // ── Setup guide button handlers ───────────────────────────────────────────
+
+        private void CopyApiKeyCommand_Click(object sender, RoutedEventArgs e)
+        {
+            Clipboard.SetText("setx GOOGLE_MAPS_API_KEY \"PASTE_YOUR_KEY_HERE\"");
+        }
+
+        private void CopyMapIdCommand_Click(object sender, RoutedEventArgs e)
+        {
+            Clipboard.SetText("setx GOOGLE_MAPS_MAP_ID \"PASTE_MAP_ID_HERE\"");
+        }
+
+        private void OpenCloudConsole_Click(object sender, RoutedEventArgs e)
+        {
+            Process.Start(new ProcessStartInfo("https://console.cloud.google.com/") { UseShellExecute = true });
+        }
+
+        private void OpenMapsDocs_Click(object sender, RoutedEventArgs e)
+        {
+            Process.Start(new ProcessStartInfo("https://developers.google.com/maps/documentation/javascript/get-api-key") { UseShellExecute = true });
+        }
+
+        private async void SetupRefreshMap_Click(object sender, RoutedEventArgs e)
+        {
+            await TryInitializeMapAsync();
         }
 
         /// <summary>
@@ -182,6 +250,17 @@ namespace DispatchTiger.Views
                 ? $"Showing {_vm.AvailableTrucks.Count} trucks  \u00b7  Job: {job.Description}"
                 : $"Showing {_vm.AvailableTrucks.Count} trucks  \u00b7  Select a job to see pickup/delivery";
 
+            // Fit legend — visible only when a job is selected
+            if (job != null)
+            {
+                MapFitLegendText.Text = "Fit:  \u2605 Best  \u2022 Good  \u25B2 Risky  \u2022 Poor  \u2022 Blocked  \u2014 badge on each marker";
+                MapFitLegendText.Visibility = System.Windows.Visibility.Visible;
+            }
+            else
+            {
+                MapFitLegendText.Visibility = System.Windows.Visibility.Collapsed;
+            }
+
             UpdateTruckStatusText();
         }
 
@@ -234,12 +313,25 @@ namespace DispatchTiger.Views
             // Gold for staged truck (intended for assignment); also gold for selected if no staged
             int stagedTruckId   = vm.StagedTruck?.Id   ?? -1;
             int selectedTruckId = vm.SelectedTruck?.Id ?? -1;
+            var fitJob          = vm.SelectedJob;        // null when no job selected
             foreach (var truck in vm.AvailableTrucks)
             {
                 var coord = TryGetZoneCoordinate(truck.CurrentLocation);
                 if (coord == null) continue;
 
-                var label = EscapeJs(BuildTruckLabel(truck));
+                // Compute fit badge when a job is selected
+                string fitLabel  = "";
+                string fitReason = "";
+                if (fitJob != null)
+                {
+                    var (tLabel, tDetail) = DispatchFitService.GetTimeFit(fitJob, truck);
+                    var (rLabel, rDetail) = DispatchFitService.GetRouteFit(fitJob, truck);
+                    var (eLabel, _)       = DispatchFitService.GetEquipmentFit(fitJob, truck);
+                    fitLabel  = DispatchFitService.GetOverallFit(truck, tLabel, rLabel, eLabel);
+                    fitReason = BuildFitReason(tLabel, tDetail, rDetail);
+                }
+
+                var label = EscapeJs(BuildTruckLabel(truck, fitLabel, fitReason));
                 // Gold for staged or selected truck, blue for available, grey for unavailable
                 string color;
                 if (truck.Id == stagedTruckId)
@@ -420,7 +512,7 @@ async function initMap() {{
 
         // ── Label builders ────────────────────────────────────────────────────────
 
-        private static string BuildTruckLabel(Truck truck)
+        private static string BuildTruckLabel(Truck truck, string fitLabel = "", string fitReason = "")
         {
             var sb = new StringBuilder();
             sb.Append("🚛 ").Append(truck.PlateNumber);
@@ -431,12 +523,18 @@ async function initMap() {{
             sb.Append('\n').Append(truck.IsAvailable ? "Available" : "Unavailable");
             if (truck.AvailableAt.HasValue)
                 sb.Append(" from ").Append(truck.AvailableAt.Value.ToString("h:mm tt"));
+            if (!string.IsNullOrWhiteSpace(fitLabel))
+            {
+                sb.Append("\nFit: ").Append(fitLabel);
+                if (!string.IsNullOrWhiteSpace(fitReason))
+                    sb.Append("\nWhy: ").Append(fitReason);
+            }
             return sb.ToString();
         }
 
         private static string BuildPickupLabel(Job job)
         {
-            var sb = new StringBuilder("📦 Pickup");
+            var sb = new StringBuilder("\U0001F4E6 Pickup");
             if (job.Shipper != null)
                 sb.Append('\n').Append(job.Shipper.Name);
             if (job.PickupLocation != null)
@@ -458,7 +556,54 @@ async function initMap() {{
             return sb.ToString();
         }
 
-        // ── JS string escape ──────────────────────────────────────────────────────
+        // ── JS string escape ────────────────────────────────────────────────────────────
+
+        private static string BuildFitReason(string timeFitLabel, string? timeFitDetail, string? routeFitDetail)
+        {
+            var parts = new List<string>();
+
+            if (timeFitDetail != null && (timeFitLabel == "Good" || timeFitLabel.StartsWith("Tight", StringComparison.Ordinal)))
+            {
+                // Extract pickup/delivery minutes from "pickup slack X; delivery slack Y"
+                string pToken = ExtractToken(timeFitDetail, "pickup slack");
+                string dToken = ExtractToken(timeFitDetail, "delivery slack");
+                if (!string.IsNullOrEmpty(pToken)) parts.Add($"pickup {pToken}");
+                if (!string.IsNullOrEmpty(dToken)) parts.Add($"delivery {dToken}");
+            }
+            else if (timeFitLabel.StartsWith("Late ", StringComparison.Ordinal))
+            {
+                parts.Add(timeFitLabel.ToLowerInvariant());
+            }
+
+            if (routeFitDetail != null)
+            {
+                string emptyToken = ExtractEmptyPct(routeFitDetail);
+                if (!string.IsNullOrEmpty(emptyToken)) parts.Add(emptyToken);
+            }
+
+            return string.Join(" \u00b7 ", parts);
+        }
+
+        private static string ExtractToken(string detail, string key)
+        {
+            int idx = detail.IndexOf(key, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) return string.Empty;
+            int start = idx + key.Length;
+            while (start < detail.Length && detail[start] == ' ') start++;
+            int end = detail.IndexOf(';', start);
+            return (end < 0 ? detail[start..] : detail[start..end]).Trim();
+        }
+
+        private static string ExtractEmptyPct(string detail)
+        {
+            const string key = "empty ";
+            int idx = detail.IndexOf(key, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) return string.Empty;
+            int start = idx + key.Length;
+            int end = detail.IndexOf(';', start);
+            string pct = (end < 0 ? detail[start..] : detail[start..end]).Trim();
+            return string.IsNullOrEmpty(pct) ? string.Empty : $"empty {pct}";
+        }
 
         private static string EscapeJs(string text)
             => text
