@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Text;
 using System.Windows;
@@ -80,6 +80,7 @@ namespace DispatchTiger.Views
             try
             {
                 await MapWebView.EnsureCoreWebView2Async();
+                MapWebView.CoreWebView2.WebMessageReceived += HandleWebMessage;
                 _webViewReady = true;
                 RefreshMap();
             }
@@ -94,9 +95,71 @@ namespace DispatchTiger.Views
             RefreshMap();
         }
 
+        /// <summary>
+        /// Handles messages posted from the map page via chrome.webview.postMessage.
+        /// Currently handles: { type: "truckClicked", truckId: N }
+        /// Sets MainViewModel.SelectedTruck and, when a job is selected, MainViewModel.StagedTruck.
+        /// Does NOT execute AssignJobCommand.
+        /// </summary>
+        private void HandleWebMessage(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
+        {
+            if (_vm == null) return;
+
+            try
+            {
+                // Parse the JSON message
+                var json = System.Text.Json.JsonDocument.Parse(e.WebMessageAsJson);
+                var root = json.RootElement;
+
+                if (!root.TryGetProperty("type", out var typeProp)) return;
+                if (typeProp.GetString() != "truckClicked") return;
+                if (!root.TryGetProperty("truckId", out var idProp)) return;
+
+                int truckId = idProp.GetInt32();
+                var truck = null as Truck;
+                foreach (var t in _vm.AvailableTrucks)
+                    if (t.Id == truckId) { truck = t; break; }
+
+                if (truck == null) return;
+
+                // Set SelectedTruck — does NOT assign; assignment still requires DayView Assign button
+                _vm.SelectedTruck = truck;
+
+                var job = _vm.SelectedJob;
+                if (!truck.IsAvailable)
+                {
+                    _vm.StatusMessage = $"Selected {truck.PlateNumber} from map — truck is unavailable. Review before assigning.";
+                }
+                else if (job != null)
+                {
+                    // Stage the truck so Day View shows the Assign button immediately
+                    _vm.StagedTruck = truck;
+                    _vm.StatusMessage = $"Staged {truck.PlateNumber} from map for Job {job.Id}. Review fit before assigning.";
+                }
+                else
+                {
+                    // No job selected — do not stage; selection only
+                    _vm.StatusMessage = $"Selected {truck.PlateNumber} from map. Select a job to stage for assignment.";
+                }
+
+                // Toolbar truck status line
+                UpdateTruckStatusText();
+
+                // SelectedTruck and StagedTruck changes both fire Vm_PropertyChanged -> RefreshMap.
+                // UpdateTruckStatusText is called synchronously here so the toolbar updates
+                // immediately without waiting for the async dispatch.
+            }
+            catch
+            {
+                // Ignore malformed messages
+            }
+        }
+
         private void Vm_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
         {
-            if (e.PropertyName is nameof(MainViewModel.SelectedJob) or nameof(MainViewModel.SelectedTruck))
+            if (e.PropertyName is nameof(MainViewModel.SelectedJob)
+                                or nameof(MainViewModel.SelectedTruck)
+                                or nameof(MainViewModel.StagedTruck))
             {
                 // Must dispatch to UI thread since PropertyChanged can fire from any context
                 Dispatcher.InvokeAsync(RefreshMap);
@@ -116,8 +179,41 @@ namespace DispatchTiger.Views
 
             var job = _vm.SelectedJob;
             MapStatusText.Text = job != null
-                ? $"Showing {_vm.AvailableTrucks.Count} trucks  ·  Job: {job.Description}"
-                : $"Showing {_vm.AvailableTrucks.Count} trucks  ·  Select a job to see pickup/delivery";
+                ? $"Showing {_vm.AvailableTrucks.Count} trucks  \u00b7  Job: {job.Description}"
+                : $"Showing {_vm.AvailableTrucks.Count} trucks  \u00b7  Select a job to see pickup/delivery";
+
+            UpdateTruckStatusText();
+        }
+
+        private void UpdateTruckStatusText()
+        {
+            var staged   = _vm?.StagedTruck;
+            var selected = _vm?.SelectedTruck;
+            var job      = _vm?.SelectedJob;
+
+            if (staged != null)
+            {
+                var status = staged.IsAvailable ? "available" : "unavailable";
+                MapTruckStatusText.Text = $"Staged: {staged.PlateNumber}  \u00b7  {status}  \u00b7  Switch to Day View to assign";
+                var colour = staged.IsAvailable
+                    ? System.Windows.Media.Color.FromRgb(255, 215, 0)   // gold when available
+                    : System.Windows.Media.Color.FromRgb(255, 140, 0);  // amber when unavailable
+                MapTruckStatusText.Foreground = new System.Windows.Media.SolidColorBrush(colour);
+            }
+            else if (selected != null)
+            {
+                var status = selected.IsAvailable ? "available" : "unavailable";
+                string suffix = job != null ? "  \u00b7  Select a candidate row to stage" : "  \u00b7  Select a job to stage for assignment";
+                MapTruckStatusText.Text = $"Selected: {selected.PlateNumber}  \u00b7  {status}{suffix}";
+                MapTruckStatusText.Foreground = new System.Windows.Media.SolidColorBrush(
+                    System.Windows.Media.Color.FromRgb(170, 170, 170));
+            }
+            else
+            {
+                MapTruckStatusText.Text = "Selected truck: none";
+                MapTruckStatusText.Foreground = new System.Windows.Media.SolidColorBrush(
+                    System.Windows.Media.Color.FromRgb(170, 170, 170));
+            }
         }
 
         // ── HTML builder ──────────────────────────────────────────────────────────
@@ -135,17 +231,29 @@ namespace DispatchTiger.Views
             var markersSb = new StringBuilder();
             markersSb.Append("const markers = [];\n");
 
-            // Truck markers
+            // Gold for staged truck (intended for assignment); also gold for selected if no staged
+            int stagedTruckId   = vm.StagedTruck?.Id   ?? -1;
+            int selectedTruckId = vm.SelectedTruck?.Id ?? -1;
             foreach (var truck in vm.AvailableTrucks)
             {
                 var coord = TryGetZoneCoordinate(truck.CurrentLocation);
                 if (coord == null) continue;
 
                 var label = EscapeJs(BuildTruckLabel(truck));
-                var color = truck.IsAvailable ? "#5B9BD5" : "#888888";
+                // Gold for staged or selected truck, blue for available, grey for unavailable
+                string color;
+                if (truck.Id == stagedTruckId)
+                    color = "#FFD700";            // gold — staged for assignment
+                else if (truck.Id == selectedTruckId)
+                    color = "#FFD700";            // gold — selected (no staged truck active)
+                else if (truck.IsAvailable)
+                    color = "#5B9BD5";            // blue — available
+                else
+                    color = "#888888";            // grey — unavailable
+
                 markersSb.Append(
                     $"markers.push({{ lat: {coord.Value.Lat}, lng: {coord.Value.Lng}, " +
-                    $"label: '{label}', color: '{color}', type: 'truck' }});\n");
+                    $"label: '{label}', color: '{color}', type: 'truck', truckId: {truck.Id} }});\n");
             }
 
             // Pickup marker
@@ -235,6 +343,7 @@ async function initMap() {{
 
         /// <summary>
         /// Marker creation JS using AdvancedMarkerElement (requires a valid Map ID).
+        /// Truck markers post a WebView2 message so the host can set SelectedTruck.
         /// </summary>
         private static string BuildAdvancedMarkerJs() => @"
   const { AdvancedMarkerElement } = await google.maps.importLibrary('marker');
@@ -265,13 +374,18 @@ async function initMap() {{
     const info = new google.maps.InfoWindow({
       content: '<div style=""font:13px sans-serif;white-space:pre-wrap;max-width:260px"">' + m.label.replace(/\n/g,'<br>') + '</div>'
     });
-    marker.addListener('click', function() { info.open({ anchor: marker, map }); });
+    marker.addListener('click', function() {
+      info.open({ anchor: marker, map });
+      if (m.type === 'truck' && window.chrome && chrome.webview) {
+        chrome.webview.postMessage({ type: 'truckClicked', truckId: m.truckId });
+      }
+    });
   });
 ";
 
         /// <summary>
         /// Marker creation JS using the legacy google.maps.Marker (no Map ID required).
-        /// Custom coloured label overlays are added via OverlayView so the colour is visible.
+        /// Truck markers post a WebView2 message so the host can set SelectedTruck.
         /// </summary>
         private static string BuildLegacyMarkerJs() => @"
   markers.forEach(function(m) {
@@ -295,7 +409,12 @@ async function initMap() {{
     const infoContent = '<div style=""font:13px sans-serif;white-space:pre-wrap;max-width:260px;padding:4px"">'
                       + m.label.replace(/\n/g,'<br>') + '</div>';
     const info = new google.maps.InfoWindow({ content: infoContent });
-    marker.addListener('click', function() { info.open(map, marker); });
+    marker.addListener('click', function() {
+      info.open(map, marker);
+      if (m.type === 'truck' && window.chrome && chrome.webview) {
+        chrome.webview.postMessage({ type: 'truckClicked', truckId: m.truckId });
+      }
+    });
   });
 ";
 

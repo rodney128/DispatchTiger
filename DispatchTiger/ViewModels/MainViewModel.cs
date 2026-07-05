@@ -23,7 +23,8 @@ namespace DispatchTiger.ViewModels
 
         private Job? _selectedJob;
         private Truck? _selectedTruck;
-        private string _currentView = "Day"; // "Day" or "Month"
+        private Truck? _stagedTruck;
+        private string _currentView = "Day"; // "Day", "Month", or "Map"
         private string _statusMessage = "Ready";
 
         // One-level undo: stores the state needed to reverse the most recent manual assignment.
@@ -40,13 +41,26 @@ namespace DispatchTiger.ViewModels
         public Job? SelectedJob
         {
             get => _selectedJob;
-            set { _selectedJob = value; OnPropertyChanged(); }
+            set
+            {
+                _selectedJob = value;
+                OnPropertyChanged();
+                // Clear staged truck when the dispatcher moves to a new job
+                StagedTruck = null;
+            }
         }
 
         public Truck? SelectedTruck
         {
             get => _selectedTruck;
             set { _selectedTruck = value; OnPropertyChanged(); }
+        }
+
+        /// <summary>The truck staged for assignment to SelectedJob. Not yet assigned.</summary>
+        public Truck? StagedTruck
+        {
+            get => _stagedTruck;
+            set { _stagedTruck = value; OnPropertyChanged(); }
         }
 
         public string CurrentView
@@ -173,6 +187,7 @@ namespace DispatchTiger.ViewModels
             // Clear selection
             SelectedJob = null;
             SelectedTruck = null;
+            StagedTruck = null;
         }
 
         /// <summary>
@@ -207,6 +222,7 @@ namespace DispatchTiger.ViewModels
             // Clear the undo record — one-level only
             _undoRecord = null;
             OnPropertyChanged(nameof(CanUndo));
+            StagedTruck = null;
         }
 
         /// <summary>

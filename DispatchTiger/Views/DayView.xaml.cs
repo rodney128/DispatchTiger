@@ -15,9 +15,7 @@ namespace DispatchTiger.Views
     {
         private DispatcherTimer _currentTimeTimer;
 
-        // Tracks the truck the dispatcher has staged from the candidate panel (not yet assigned)
-        private Truck? _selectedCandidateTruck;
-
+        // StagedTruck is owned by MainViewModel.StagedTruck (shared with MapView).
         // When false (default), Unknown and Blocked rows are hidden from the candidate table
         private bool _showAllCandidateTrucks;
 
@@ -376,9 +374,9 @@ namespace DispatchTiger.Views
 
         private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
         {
-            if (e.PropertyName == nameof(MainViewModel.SelectedJob))
+            if (e.PropertyName is nameof(MainViewModel.SelectedJob)
+                                or nameof(MainViewModel.StagedTruck))
             {
-                _selectedCandidateTruck = null;   // reset staged truck on new job selection
                 _showAllCandidateTrucks = false;  // collapse to usable-only view for fresh job
                 BuildCandidatePanel();
             }
@@ -463,23 +461,23 @@ namespace DispatchTiger.Views
             }
 
             // Selection status — appended to the summary line
-            if (_selectedCandidateTruck != null)
+            if (vm.StagedTruck != null)
             {
                 AddSummaryRun(CandidateJobSummaryPanel, "    ✔ Staged: ", Color.FromRgb(100, 200, 100));
-                AddSummaryRun(CandidateJobSummaryPanel, _selectedCandidateTruck.PlateNumber,
+                AddSummaryRun(CandidateJobSummaryPanel, vm.StagedTruck.PlateNumber,
                     Color.FromRgb(242, 200, 80), bold: true);
             }
 
             // -- Action bar: Assign staged truck button --
             CandidateActionBar.Children.Clear();
 
-            bool canAssign = _selectedCandidateTruck != null && job.Status == DispatchStatus.Unassigned;
+            bool canAssign = vm.StagedTruck != null && job.Status == DispatchStatus.Unassigned;
 
             if (canAssign)
             {
                 var assignBtn = new Button
                 {
-                    Content    = $"✓ Assign {_selectedCandidateTruck!.PlateNumber} to Job {job.Id}",
+                    Content    = $"✓ Assign {vm.StagedTruck!.PlateNumber} to Job {job.Id}",
                     FontSize   = 11,
                     Padding    = new Thickness(8, 2, 8, 2),
                     Margin     = new Thickness(0, 0, 8, 0),
@@ -489,7 +487,7 @@ namespace DispatchTiger.Views
                     BorderThickness = new Thickness(0)
                 };
 
-                var stagedTruck = _selectedCandidateTruck;   // capture for closure
+                var stagedTruck = vm.StagedTruck;   // capture for closure
                 assignBtn.Click += (_, _) =>
                 {
                     if (DataContext is not MainViewModel assignVm) return;
@@ -513,8 +511,9 @@ namespace DispatchTiger.Views
                         assignVm.StatusMessage = $"✓ {ts} · Assigned \"{capturedDesc}\" to {capturedPlate}";
                     }
 
-                    // Clear local staging — AssignJob sets SelectedJob = null which collapses the panel
-                    _selectedCandidateTruck = null;
+                    // StagedTruck cleared by AssignJob (SelectedJob = null fires the setter).
+                    // Explicit clear here handles any edge case where Execute didn't complete.
+                    assignVm.StagedTruck = null;
                 };
 
                 CandidateActionBar.Children.Add(assignBtn);
@@ -658,15 +657,15 @@ namespace DispatchTiger.Views
                     AddBarRun(string.Join(" · ", whyParts), softGray);
                 }
 
-                if (_selectedCandidateTruck != null)
+                if (vm.StagedTruck != null)
                 {
                     AddBarRun("    Staged: ", dimGray);
-                    AddBarRun(_selectedCandidateTruck.PlateNumber, gold, bold: true);
+                    AddBarRun(vm.StagedTruck.PlateNumber, gold, bold: true);
                 }
 
                 // Stage Recommended button — inline in the recommendation bar
-                bool recAlreadyStaged = _selectedCandidateTruck != null
-                    && ReferenceEquals(_selectedCandidateTruck, recommendedTruck);
+                bool recAlreadyStaged = vm.StagedTruck != null
+                    && ReferenceEquals(vm.StagedTruck, recommendedTruck);
 
                 var stageRecBtn = new Button
                 {
@@ -697,7 +696,9 @@ namespace DispatchTiger.Views
                     var truckToStage = recommendedTruck!;   // capture for closure
                     stageRecBtn.Click += (_, _) =>
                     {
-                        _selectedCandidateTruck = truckToStage;
+                        if (DataContext is not MainViewModel stageVm) return;
+                        stageVm.StagedTruck   = truckToStage;
+                        stageVm.SelectedTruck = truckToStage;
                         BuildCandidatePanel();
                     };
                 }
@@ -741,13 +742,13 @@ namespace DispatchTiger.Views
                     _showAllCandidateTrucks = !_showAllCandidateTrucks;
 
                     // If collapsing back to filtered view, clear any staged truck that is now hidden
-                    if (!_showAllCandidateTrucks && _selectedCandidateTruck != null)
+                    if (!_showAllCandidateTrucks && vm.StagedTruck != null)
                     {
                         var stagedFit = candidates
-                            .FirstOrDefault(c => ReferenceEquals(c.Truck, _selectedCandidateTruck))
+                            .FirstOrDefault(c => ReferenceEquals(c.Truck, vm.StagedTruck))
                             ?.FitLabel;
                         if (stagedFit is "Unknown" or "Blocked")
-                            _selectedCandidateTruck = null;
+                            vm.StagedTruck = null;
                     }
 
                     BuildCandidatePanel();
@@ -765,7 +766,7 @@ namespace DispatchTiger.Views
             {
                 var truck = c.Truck;
                 bool isRecommended = recommendedTruck != null && ReferenceEquals(truck, recommendedTruck);
-                bool isSelected    = _selectedCandidateTruck != null && ReferenceEquals(truck, _selectedCandidateTruck);
+                bool isSelected    = vm.StagedTruck != null && ReferenceEquals(truck, vm.StagedTruck);
                 bool isBlocked     = c.FitLabel == "Blocked";
 
                 // Prepend the star marker only to the single recommended row
@@ -797,8 +798,10 @@ namespace DispatchTiger.Views
                 {
                     row.MouseLeftButtonUp += (_, _) =>
                     {
-                        _selectedCandidateTruck = truck;
-                        BuildCandidatePanel();   // redraw to reflect selection
+                        if (DataContext is not MainViewModel rowVm) return;
+                        rowVm.StagedTruck   = truck;
+                        rowVm.SelectedTruck = truck;
+                        // StagedTruck change triggers OnViewModelPropertyChanged -> BuildCandidatePanel
                     };
                 }
                 row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(90) });   // Truck
