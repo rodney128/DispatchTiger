@@ -304,10 +304,19 @@ namespace DispatchTiger.Services
             drivers ??= GenerateDrivers(30);
             var trucks = new List<Truck>();
 
+            // Deal drivers to trucks WITHOUT replacement so no two seeded trucks share a
+            // driver (and therefore no duplicate active driver names). Shuffle the driver
+            // ids once, then hand them out; when the pool is empty the remaining trucks are
+            // simply left unassigned. This is demo-data realism only — no runtime rule.
+            var driverPool = new Queue<int>(
+                drivers.Select(d => d.Id).OrderBy(_ => Random.Next()));
+
             for (int i = 1; i <= count; i++)
             {
-                // Some trucks have drivers, some don't
-                int? driverId = Random.Next(100) < 70 ? drivers[Random.Next(drivers.Count)].Id : null;
+                // ~70% of trucks get a driver, but only while unique drivers remain.
+                int? driverId = (Random.Next(100) < 70 && driverPool.Count > 0)
+                    ? driverPool.Dequeue()
+                    : null;
 
                 trucks.Add(new Truck
                 {
@@ -316,7 +325,8 @@ namespace DispatchTiger.Services
                     VehicleType = VehicleTypes[Random.Next(VehicleTypes.Length)],
                     DriverId = driverId,
                     Driver = driverId.HasValue ? drivers.First(d => d.Id == driverId) : null,
-                    Capacity = Random.Next(100) < 30 ? null : Random.Next(500, 5000), // Some missing capacity
+                    Capacity = Random.Next(100) < 30 ? null : Random.Next(500, 5000), // weight capacity in kg
+                    CapacityUnits = Random.Next(100) < 25 ? null : Random.Next(4, 33), // pallet/unit capacity
                     IsAvailable = Random.Next(100) > 20, // 80% available
                     // AvailableAt: ~70% of trucks have a known free time today
                     AvailableAt = Random.Next(100) < 70
@@ -398,6 +408,13 @@ namespace DispatchTiger.Services
                 // Assign RequiredEquipment to ~50% of jobs using values that can match truck VehicleType
                 if (Random.Next(100) < 50)
                     job.RequiredEquipment = RequiredEquipmentOptions[Random.Next(RequiredEquipmentOptions.Length)];
+
+                // Seed load weight and unit count to ~70% of jobs for capacity display
+                if (Random.Next(100) < 70)
+                {
+                    job.LoadWeightKg = Random.Next(50, 2001);  // 50 – 2 000 kg
+                    job.LoadUnits    = Random.Next(1, 17);      // 1 – 16 pallets/units
+                }
 
                 // Create assignment if job is assigned
                 if (isAssigned && truck != null)

@@ -32,6 +32,13 @@ namespace DispatchTiger.Models
         /// <summary>Truck/equipment type required for this job, e.g. Flatbed, Box Truck, Reefer (null = no specific requirement).</summary>
         public string? RequiredEquipment { get; set; }
 
+        // Load/weight fields — basic capacity utilisation without multi-stop routing
+        /// <summary>Estimated or declared load weight in kilograms (null = unknown).</summary>
+        public int? LoadWeightKg { get; set; }
+
+        /// <summary>Number of discrete load units (pallets, boxes, crates — null = unknown).</summary>
+        public int? LoadUnits { get; set; }
+
         // Company references — additive; existing address string fields are unchanged
         public int?     CustomerId { get; set; }
         public Company? Customer   { get; set; }
@@ -48,6 +55,12 @@ namespace DispatchTiger.Models
 
         public int?             DeliveryLocationId { get; set; }
         public CompanyLocation? DeliveryLocation   { get; set; }
+
+        /// <summary>
+        /// Short display identity that distinguishes jobs with identical descriptions.
+        /// Format: "{Description} #{Id}"  e.g. "Bulk delivery #17"
+        /// </summary>
+        public string DisplayName => $"{Description} #{Id}";
 
         public override string ToString() => $"Job {Id}: {Description}";
     }

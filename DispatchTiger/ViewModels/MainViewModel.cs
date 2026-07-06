@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
@@ -149,6 +149,67 @@ namespace DispatchTiger.ViewModels
         }
 
         /// <summary>
+        /// Result of a staged-assignment attempt, returned so views can surface
+        /// view-specific confirmation banners without re-implementing the workflow.
+        /// </summary>
+        public readonly record struct AssignStagedResult(bool Success, string JobName, string TruckName);
+
+        /// <summary>
+        /// Centralized "assign the staged truck to the selected job" workflow shared by
+        /// Map View and Day View. Validates state, promotes StagedTruck to SelectedTruck,
+        /// invokes AssignJobCommand, sets the footer StatusMessage, and clears staging.
+        /// Returns a result describing what happened so callers can show their own banner.
+        /// </summary>
+        /// <param name="reselectAfterAssign">
+        /// When true (Map View), the just-assigned job and its truck are re-selected after
+        /// assignment so the map keeps showing pickup/delivery/route and the assigned truck.
+        /// When false (Day View / default), selection is left cleared as before.
+        /// </param>
+        public AssignStagedResult AssignStaged(bool reselectAfterAssign = false)
+        {
+            var job    = SelectedJob;
+            var staged = StagedTruck;
+
+            if (job == null || staged == null || job.Status != DispatchStatus.Unassigned)
+                return new AssignStagedResult(false, string.Empty, string.Empty);
+
+            // Capture display values before AssignJob() clears the selection.
+            string jobName   = job.DisplayName;
+            string truckName = staged.DisplayName;
+
+            // Promote the staged truck to SelectedTruck only at the moment of assignment.
+            SelectedTruck = staged;
+
+            if (!AssignJobCommand.CanExecute(null))
+            {
+                StagedTruck = null;
+                return new AssignStagedResult(false, jobName, truckName);
+            }
+
+            AssignJobCommand.Execute(null);
+
+            // AssignJob() has cleared SelectedJob / SelectedTruck / StagedTruck.
+            string ts = DateTime.Now.ToString("h:mm tt");
+            StatusMessage = $"\u2713 {ts} \u00B7 Assigned {jobName} to {truckName} \u00B7 Undo available";
+
+            // Belt-and-suspenders: guarantee staging is cleared even on an edge case.
+            StagedTruck = null;
+
+            // Map View opts into keeping the assigned-job context on the map: re-select the
+            // now-assigned job and its truck so pickup/delivery/route/marker stay visible.
+            // The job is now Assigned (not Unassigned), so the AssignmentPanel stays hidden
+            // and StagedTruck remains null.
+            if (reselectAfterAssign)
+            {
+                SelectedJob   = job;    // job.Status == Assigned, job.Truck == staged
+                SelectedTruck = staged;
+                StagedTruck   = null;   // SelectedJob setter may touch staging; keep it cleared
+            }
+
+            return new AssignStagedResult(true, jobName, truckName);
+        }
+
+        /// <summary>
         /// Assigns the selected job to the selected truck.
         /// </summary>
         private void AssignJob()
@@ -217,7 +278,7 @@ namespace DispatchTiger.ViewModels
             Assignments.Remove(addedAssignment);
             UnassignedJobs.Add(job);
 
-            StatusMessage = $"\u21B6 Undid assignment of \"{job.Description}\"";
+            StatusMessage = $"\u21B6 Undid assignment of {job.DisplayName}";
 
             // Clear the undo record — one-level only
             _undoRecord = null;

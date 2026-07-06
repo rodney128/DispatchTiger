@@ -245,7 +245,7 @@ namespace DispatchTiger.Views
                             Margin = new Thickness(0, 0, 0, 3),
                             Cursor = System.Windows.Input.Cursors.Hand,
                             Tag = job,
-                            ToolTip = $"{job.Description}\nAddress: {job.DeliveryAddress ?? "—"}\nPriority: {job.Priority?.ToString() ?? "—"}\nTruck: {job.Truck?.PlateNumber ?? "Unassigned"}\nStatus: {job.Status}"
+                            ToolTip = $"{job.DisplayName}\nAddress: {job.DeliveryAddress ?? "—"}\nPriority: {job.Priority?.ToString() ?? "—"}\nTruck: {job.Truck?.PlateNumber ?? "Unassigned"}\nStatus: {job.Status}"
                         };
                         cardBorder.MouseLeftButtonUp += JobCard_MouseLeftButtonUp;
 
@@ -271,10 +271,10 @@ namespace DispatchTiger.Views
                         };
                         Grid.SetColumn(contentStack, 1);
 
-                        // Title: job description (bold)
+                        // Title: description + id so duplicate descriptions are distinguishable
                         contentStack.Children.Add(new TextBlock
                         {
-                            Text = job.Description,
+                            Text = job.DisplayName,
                             FontSize = 11,
                             FontWeight = FontWeights.Bold,
                             Foreground = new SolidColorBrush(Color.FromRgb(220, 220, 220)),
@@ -400,7 +400,7 @@ namespace DispatchTiger.Views
             CandidateJobSummaryPanel.Children.Clear();
 
             AddSummaryRun(CandidateJobSummaryPanel, "Truck candidates for: ", Color.FromRgb(136, 136, 136));
-            AddSummaryRun(CandidateJobSummaryPanel, job.Description, Color.FromRgb(242, 140, 40), bold: true);
+            AddSummaryRun(CandidateJobSummaryPanel, job.DisplayName, Color.FromRgb(242, 140, 40), bold: true);
 
             // Show raw address only when no location is linked (mirrors job-card fallback)
             if (job.PickupLocation == null && !string.IsNullOrEmpty(job.PickupAddress))
@@ -478,7 +478,7 @@ namespace DispatchTiger.Views
             {
                 var assignBtn = new Button
                 {
-                    Content    = $"✓ Assign {vm.StagedTruck!.PlateNumber} to Job {job.Id}",
+                    Content    = $"✓ Assign {vm.StagedTruck!.PlateNumber} to {job.DisplayName}",
                     FontSize   = 11,
                     Padding    = new Thickness(8, 2, 8, 2),
                     Margin     = new Thickness(0, 0, 8, 0),
@@ -488,36 +488,38 @@ namespace DispatchTiger.Views
                     BorderThickness = new Thickness(0)
                 };
 
-                var stagedTruck = vm.StagedTruck;   // capture for closure
                 assignBtn.Click += (_, _) =>
                 {
                     if (DataContext is not MainViewModel assignVm) return;
-                    if (assignVm.SelectedJob == null) return;
-                    if (stagedTruck == null) return;
-                    if (assignVm.SelectedJob.Status != DispatchStatus.Unassigned) return;
-
-                    // Capture display values before Execute clears SelectedJob
-                    int    capturedJobId   = assignVm.SelectedJob.Id;
-                    string capturedDesc    = assignVm.SelectedJob.Description;
-                    string capturedPlate   = stagedTruck.PlateNumber;
-
-                    // Set vm.SelectedTruck only at the moment of assignment, not during staging
-                    assignVm.SelectedTruck = stagedTruck;
-
-                    if (assignVm.AssignJobCommand.CanExecute(null))
-                    {
-                        assignVm.AssignJobCommand.Execute(null);
-                        // Only update status after a confirmed successful execute
-                        string ts = DateTime.Now.ToString("h:mm tt");
-                        assignVm.StatusMessage = $"✓ {ts} · Assigned \"{capturedDesc}\" to {capturedPlate}";
-                    }
-
-                    // StagedTruck cleared by AssignJob (SelectedJob = null fires the setter).
-                    // Explicit clear here handles any edge case where Execute didn't complete.
-                    assignVm.StagedTruck = null;
+                    // Delegate the full assignment workflow to the shared ViewModel method
+                    // (validate, promote staged truck, AssignJobCommand, StatusMessage, clear).
+                    assignVm.AssignStaged();
                 };
 
                 CandidateActionBar.Children.Add(assignBtn);
+
+                // Cancel staging button - clears the staged truck but keeps the job selected,
+                // giving Day View the same explicit unstage affordance as Map View.
+                var cancelBtn = new Button
+                {
+                    Content    = "✕ Cancel",
+                    FontSize   = 11,
+                    Padding    = new Thickness(8, 2, 8, 2),
+                    Margin     = new Thickness(0, 0, 8, 0),
+                    Cursor     = System.Windows.Input.Cursors.Hand,
+                    Foreground = new SolidColorBrush(Color.FromRgb(220, 220, 220)),
+                    Background = new SolidColorBrush(Color.FromRgb(60, 60, 60)),
+                    BorderThickness = new Thickness(0)
+                };
+
+                cancelBtn.Click += (_, _) =>
+                {
+                    if (DataContext is not MainViewModel cancelVm) return;
+                    // Clear staging only; keep SelectedJob so the dispatcher can re-pick a truck.
+                    cancelVm.StagedTruck = null;
+                };
+
+                CandidateActionBar.Children.Add(cancelBtn);
             }
 
             // -- Candidate rows --

@@ -25,9 +25,9 @@
                         BorderThickness="1"
                         Cursor="Hand"
                         VerticalAlignment="Center"/>
-                <Button x:Name="FitToJobButton"
-                        Content="&#x25CE;  Fit to Job"
-                        Click="FitToJobButton_Click"
+                <Button x:Name="ZoomToJobButton"
+                        Content="&#x25CE;  Zoom to Job"
+                        Click="ZoomToJobButton_Click"
                         DockPanel.Dock="Right"
                         Padding="10,3"
                         Margin="0,0,6,0"
@@ -39,35 +39,7 @@
                         Cursor="Hand"
                         VerticalAlignment="Center"
                         Visibility="Collapsed"/>
-                <!-- Assign staged truck — only visible when a job is selected, truck is staged, and job is unassigned -->
-                <Button x:Name="CancelStagingButton"
-                        Content="Cancel"
-                        Click="CancelStagingButton_Click"
-                        DockPanel.Dock="Right"
-                        Padding="8,3"
-                        Margin="0,0,4,0"
-                        FontSize="12"
-                        Foreground="#AAAAAA"
-                        Background="Transparent"
-                        BorderBrush="#555555"
-                        BorderThickness="1"
-                        Cursor="Hand"
-                        VerticalAlignment="Center"
-                        Visibility="Collapsed"/>
-                <Button x:Name="AssignStagedButton"
-                        Content="&#x2713;  Assign"
-                        Click="AssignStagedButton_Click"
-                        DockPanel.Dock="Right"
-                        Padding="10,3"
-                        Margin="0,0,4,0"
-                        FontSize="12"
-                        FontWeight="SemiBold"
-                        Foreground="#1E1E1E"
-                        Background="#4CAF50"
-                        BorderThickness="0"
-                        Cursor="Hand"
-                        VerticalAlignment="Center"
-                        Visibility="Collapsed"/>
+                <!-- toolbar info + inline assignment confirmation row -->
                 <StackPanel Orientation="Vertical" VerticalAlignment="Center">
                     <TextBlock Name="MapStatusText"
                                Text="Map View &#x2014; Vancouver Island dispatch"
@@ -87,12 +59,48 @@
                                Text=""
                                Foreground="#888888"
                                FontSize="10"
+                               TextWrapping="Wrap"
                                Visibility="Collapsed"/>
-                    <TextBlock x:Name="MapRouteLegendText"
-                               Text=""
-                               Foreground="#888888"
-                               FontSize="10"
-                               Visibility="Collapsed"/>
+
+                    <!-- Assignment confirmation row — pure WPF, no WebView2 airspace issue -->
+                    <Border x:Name="AssignmentPanel"
+                            Margin="0,5,0,2"
+                            Padding="10,5"
+                            Background="#252525"
+                            BorderBrush="#FFD700"
+                            BorderThickness="1"
+                            CornerRadius="4"
+                            Visibility="Collapsed">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <TextBlock x:Name="AssignmentPanelText"
+                                       Text="Assign truck to job?"
+                                       Foreground="#EEEEEE"
+                                       FontSize="12"
+                                       VerticalAlignment="Center"
+                                       Margin="0,0,12,0"/>
+                            <Button x:Name="AssignStagedButton"
+                                    Content="&#x2713;  Assign"
+                                    Click="AssignStagedButton_Click"
+                                    Padding="10,3"
+                                    Margin="0,0,6,0"
+                                    FontSize="12"
+                                    FontWeight="SemiBold"
+                                    Foreground="#1E1E1E"
+                                    Background="#4CAF50"
+                                    BorderThickness="0"
+                                    Cursor="Hand"/>
+                            <Button x:Name="CancelStagingButton"
+                                    Content="Cancel"
+                                    Click="CancelStagingButton_Click"
+                                    Padding="8,3"
+                                    FontSize="12"
+                                    Foreground="#CCCCCC"
+                                    Background="Transparent"
+                                    BorderBrush="#555555"
+                                    BorderThickness="1"
+                                    Cursor="Hand"/>
+                        </StackPanel>
+                    </Border>
                 </StackPanel>
             </DockPanel>
         </Border>

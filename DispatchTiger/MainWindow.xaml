@@ -92,7 +92,7 @@
                                             </Style>
                                         </Border.Style>
                                         <StackPanel>
-                                            <TextBlock Text="{Binding Description}" Style="{StaticResource JobDescription}"/>
+                                            <TextBlock Text="{Binding DisplayName}" Style="{StaticResource JobDescription}"/>
                                             <!-- Pickup: ShipperName — LocationName (shown when PickupLocation is set) -->
                                             <TextBlock Style="{StaticResource JobSubtext}" FontSize="11"
                                                        Visibility="{Binding PickupLocation, Converter={StaticResource NullToCollapsed}}">

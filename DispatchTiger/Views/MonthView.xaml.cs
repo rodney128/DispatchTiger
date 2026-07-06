@@ -15,6 +15,32 @@ namespace DispatchTiger.Views
         {
             InitializeComponent();
             this.Loaded += MonthView_Loaded;
+            this.DataContextChanged += MonthView_DataContextChanged;
+        }
+
+        private MainViewModel? _vm;
+
+        private void MonthView_DataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
+        {
+            if (_vm != null)
+                _vm.PropertyChanged -= ViewModel_PropertyChanged;
+
+            _vm = DataContext as MainViewModel;
+
+            if (_vm != null)
+            {
+                _vm.PropertyChanged += ViewModel_PropertyChanged;
+                BuildCalendar(_vm);
+            }
+        }
+
+        private void ViewModel_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+        {
+            // Rebuild when selection or assignments change so today/selected highlights and
+            // truck labels stay in sync with the rest of the app.
+            if (_vm == null) return;
+            if (e.PropertyName is nameof(MainViewModel.SelectedJob) or nameof(MainViewModel.Assignments))
+                BuildCalendar(_vm);
         }
 
         private void MonthView_Loaded(object sender, RoutedEventArgs e)
@@ -88,11 +114,15 @@ namespace DispatchTiger.Views
         /// </summary>
         private Border CreateDayCell(DateTime date, MainViewModel vm)
         {
+            bool isToday = date.Date == DateTime.Now.Date;
+
             var border = new Border
             {
                 Background = new SolidColorBrush(Color.FromRgb(38, 38, 38)),
-                BorderThickness = new Thickness(1),
-                BorderBrush = new SolidColorBrush(Color.FromRgb(68, 68, 68)),
+                BorderThickness = new Thickness(isToday ? 2 : 1),
+                BorderBrush = isToday
+                    ? new SolidColorBrush(Color.FromRgb(255, 140, 0))   // orange outline marks today
+                    : new SolidColorBrush(Color.FromRgb(68, 68, 68)),
                 Margin = new Thickness(2),
                 Padding = new Thickness(4)
             };
@@ -107,7 +137,9 @@ namespace DispatchTiger.Views
                 Text = date.Day.ToString(),
                 FontSize = 14,
                 FontWeight = FontWeights.Bold,
-                Foreground = new SolidColorBrush(Color.FromRgb(200, 200, 200))
+                Foreground = isToday
+                    ? new SolidColorBrush(Color.FromRgb(255, 170, 60))  // brighter for today
+                    : new SolidColorBrush(Color.FromRgb(200, 200, 200))
             };
             Grid.SetRow(dayNumber, 0);
             grid.Children.Add(dayNumber);
@@ -161,15 +193,26 @@ namespace DispatchTiger.Views
                     };
                     jobItemBorder.MouseLeftButtonUp += JobCell_MouseLeftButtonUp;
 
+                    // Highlight the currently selected job so it stands out across the month grid.
+                    if (vm.SelectedJob != null && ReferenceEquals(vm.SelectedJob, job))
+                    {
+                        jobItemBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(0, 200, 255)); // cyan = selected
+                        jobItemBorder.BorderThickness = new Thickness(2);
+                    }
+
+                    jobItemBorder.ToolTip = $"{job.DisplayName}\nStatus: {job.Status}\nTruck: {job.Truck?.PlateNumber ?? "Unassigned"}";
+
                     var jobGrid = new Grid();
                     jobGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
                     jobGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) });
 
                     var jobDesc = new TextBlock
                     {
-                        Text = job.Description,
+                        Text = job.DisplayName,
                         FontSize = 8,
-                        Foreground = new SolidColorBrush(Color.FromRgb(255, 140, 0)),
+                        Foreground = job.Status == DispatchStatus.Unassigned
+                            ? new SolidColorBrush(Color.FromRgb(255, 140, 0))   // orange = unassigned
+                            : new SolidColorBrush(Color.FromRgb(120, 200, 120)), // green = assigned
                         TextWrapping = TextWrapping.Wrap,
                         MaxWidth = 120
                     };
@@ -218,32 +261,6 @@ namespace DispatchTiger.Views
             if (sender is Border border && border.Tag is Job job && DataContext is MainViewModel vm)
             {
                 vm.SelectedJob = job;
-            }
-        }
-    }
-
-    /// <summary>
-    /// Helper to find visual children in WPF tree.
-    /// </summary>
-    internal static class WPFExtensions
-    {
-        public static IEnumerable<T> FindVisualChildren<T>(this System.Windows.DependencyObject depObj) where T : System.Windows.DependencyObject
-        {
-            if (depObj != null)
-            {
-                for (int i = 0; i < System.Windows.Media.VisualTreeHelper.GetChildrenCount(depObj); i++)
-                {
-                    var child = System.Windows.Media.VisualTreeHelper.GetChild(depObj, i);
-                    if (child != null && child is T)
-                    {
-                        yield return (T)child;
-                    }
-
-                    foreach (var childOfChild in FindVisualChildren<T>(child))
-                    {
-                        yield return childOfChild;
-                    }
-                }
             }
         }
     }

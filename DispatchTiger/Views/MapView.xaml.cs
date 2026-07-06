@@ -1,4 +1,4 @@
-using System;
+﻿﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -20,6 +20,7 @@ namespace DispatchTiger.Views
         private bool _mapHtmlLoaded;                                    // true once NavigationCompleted fires successfully
         private int? _lastFittedJobId;                                  // id of the last job we called fitBounds for; prevents refitting the same job
         private System.Threading.CancellationTokenSource? _markerDebounce; // collapses rapid PropertyChanged firings
+        private string? _mapSuccessMessage;                             // set after assignment; shown in toolbar until next job is selected
 
         public MapView()
         {
@@ -97,38 +98,73 @@ namespace DispatchTiger.Views
             FullReloadMap();
         }
 
-        private async void FitToJobButton_Click(object sender, RoutedEventArgs e)
+        private async void ZoomToJobButton_Click(object sender, RoutedEventArgs e)
         {
-            // Manual recentre — fits to all visible markers without a full reload.
-            await PushMarkersAsync(fitBounds: true);
+            await ZoomToJobAsync();
+        }
+
+        /// <summary>
+        /// Calls the dedicated JS zoom function with only the selected job’s
+        /// pickup and delivery coordinates. Excludes all truck positions.
+        /// </summary>
+        private async Task ZoomToJobAsync()
+        {
+            if (!_mapHtmlLoaded || !_webViewReady || _vm?.SelectedJob == null) return;
+            string boundsJson = BuildJobBoundsJson(_vm);
+            if (boundsJson == "[]") return;
+            string escaped = boundsJson.Replace("\\", "\\\\").Replace("'", "\\'");
+            try { await MapWebView.ExecuteScriptAsync($"window.dispatchTigerZoomToJob('{escaped}');"); }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MapView] ZoomToJob script failed (WebView not ready?): {ex.Message}"); }
+        }
+
+        /// <summary>
+        /// Returns a JSON array of lat/lng points for the selected job’s
+        /// pickup and delivery coordinates only (no trucks, no fleet).
+        /// </summary>
+        private static string BuildJobBoundsJson(MainViewModel vm)
+        {
+            var job = vm.SelectedJob;
+            if (job == null) return "[]";
+
+            var pts = new List<(double Lat, double Lng)>();
+
+            var pickup = TryGetZoneCoordinate(job.PickupLocation?.Zone)
+                      ?? TryGetZoneCoordinate(job.PickupLocation?.Address)
+                      ?? TryGetZoneCoordinate(job.PickupAddress);
+            if (pickup != null) pts.Add(pickup.Value);
+
+            var delivery = TryGetZoneCoordinate(job.DeliveryLocation?.Zone)
+                        ?? TryGetZoneCoordinate(job.DeliveryLocation?.Address)
+                        ?? TryGetZoneCoordinate(job.DeliveryAddress);
+            if (delivery != null) pts.Add(delivery.Value);
+
+            if (pts.Count == 0) return "[]";
+
+            var sb = new StringBuilder("[");
+            for (int i = 0; i < pts.Count; i++)
+            {
+                if (i > 0) sb.Append(',');
+                sb.Append($"{{\"lat\":{pts[i].Lat:F6},\"lng\":{pts[i].Lng:F6}}}");
+            }
+            sb.Append(']');
+            return sb.ToString();
         }
 
         private void AssignStagedButton_Click(object sender, RoutedEventArgs e)
         {
             if (_vm == null) return;
-            var job    = _vm.SelectedJob;
-            var staged = _vm.StagedTruck;
-            if (job == null || staged == null) return;
-            if (job.Status != DispatchStatus.Unassigned) return;
 
-            // Capture display values before Execute clears SelectedJob/StagedTruck
-            string capturedDesc  = job.Description;
-            string capturedPlate = staged.PlateNumber;
+            // Delegate the full assignment workflow to the shared ViewModel method
+            // (validate, promote staged truck, AssignJobCommand, StatusMessage, clear).
+            // reselectAfterAssign:true keeps the assigned job + truck selected so the map
+            // retains pickup/delivery/route and shows the assigned truck in green.
+            var result = _vm.AssignStaged(reselectAfterAssign: true);
+            if (!result.Success) return;
 
-            // Mirror the DayView assignment path exactly:
-            // set SelectedTruck at the moment of assignment, then invoke the command.
-            _vm.SelectedTruck = staged;
-
-            if (_vm.AssignJobCommand.CanExecute(null))
-            {
-                _vm.AssignJobCommand.Execute(null);
-                string ts = DateTime.Now.ToString("h:mm tt");
-                _vm.StatusMessage = $"\u2713 {ts} \u00B7 Assigned \"{capturedDesc}\" to {capturedPlate}";
-            }
-
-            // AssignJob() clears SelectedJob/SelectedTruck/StagedTruck.
-            // Vm_PropertyChanged fires → PushMarkersAsync → buttons collapse automatically.
-            // No NavigateToString, no manual marker reload needed here.
+            // Job stays selected (now Assigned), so the render block shows the assigned
+            // confirmation text and the AssignmentPanel hides on its own. Push immediately
+            // (fitBounds:false so the viewport does not jump) to reflect the new state now.
+            _ = PushMarkersAsync(fitBounds: false);
         }
 
         private void CancelStagingButton_Click(object sender, RoutedEventArgs e)
@@ -241,7 +277,7 @@ namespace DispatchTiger.Views
         /// Handles messages posted from the map page via chrome.webview.postMessage.
         /// Currently handles: { type: "truckClicked", truckId: N }
         /// Sets MainViewModel.SelectedTruck and, when a job is selected, MainViewModel.StagedTruck.
-        /// Does NOT execute AssignJobCommand.
+        /// Does NOT execute AssignJobCommand — assignment is via the WPF overlay panel.
         /// </summary>
         private void HandleWebMessage(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
         {
@@ -249,7 +285,6 @@ namespace DispatchTiger.Views
 
             try
             {
-                // Parse the JSON message
                 var json = System.Text.Json.JsonDocument.Parse(e.WebMessageAsJson);
                 var root = json.RootElement;
 
@@ -264,7 +299,7 @@ namespace DispatchTiger.Views
 
                 if (truck == null) return;
 
-                // Set SelectedTruck — does NOT assign; assignment still requires DayView Assign button
+                // Set SelectedTruck — does NOT assign; assignment is via the WPF panel
                 _vm.SelectedTruck = truck;
 
                 var job = _vm.SelectedJob;
@@ -274,14 +309,14 @@ namespace DispatchTiger.Views
                 }
                 else if (job != null)
                 {
-                    // Stage the truck so Day View shows the Assign button immediately
+                    // Stage the truck — the WPF overlay panel will appear immediately
                     _vm.StagedTruck = truck;
-                    _vm.StatusMessage = $"Staged {truck.PlateNumber} from map for Job {job.Id}. Review fit before assigning.";
+                    _vm.StatusMessage = $"Staged {truck.PlateNumber} for {job.DisplayName}.";
                 }
                 else
                 {
-                    // No job selected — do not stage; selection only
-                    _vm.StatusMessage = $"Selected {truck.PlateNumber} from map. Select a job to stage for assignment.";
+                    // No job selected - selection only, no staging
+                    _vm.StatusMessage = $"Selected {truck.DisplayName}. Pick a job first, then click a truck to stage it.";
                 }
 
                 // Toolbar truck status line
@@ -291,9 +326,9 @@ namespace DispatchTiger.Views
                 // UpdateTruckStatusText is called synchronously here so the toolbar updates
                 // immediately without waiting for the debounced async push.
             }
-            catch
+            catch (Exception ex)
             {
-                // Ignore malformed messages
+                System.Diagnostics.Debug.WriteLine($"[MapView] Malformed web message ignored: {ex.Message}");
             }
         }
 
@@ -301,8 +336,22 @@ namespace DispatchTiger.Views
         {
             if (e.PropertyName is not (nameof(MainViewModel.SelectedJob)
                                    or nameof(MainViewModel.SelectedTruck)
-                                   or nameof(MainViewModel.StagedTruck)))
+                                   or nameof(MainViewModel.StagedTruck)
+                                   or nameof(MainViewModel.StatusMessage)))
                 return;
+
+            // When Undo fires it sets StatusMessage — clear the success banner so the
+            // toolbar reverts to the standard 'Select a job' or undo-confirmation text.
+            if (e.PropertyName == nameof(MainViewModel.StatusMessage))
+            {
+                if (_mapSuccessMessage != null)
+                {
+                    _mapSuccessMessage = null;
+                    // Refresh toolbar text on the UI thread without moving viewport.
+                    Dispatcher.InvokeAsync(async () => await PushMarkersAsync(fitBounds: false));
+                }
+                return;
+            }
 
             // Viewport rules:
             //   SelectedJob  → different job : fitBounds = true  (fit once to pickup/delivery/trucks)
@@ -359,6 +408,7 @@ namespace DispatchTiger.Views
                 return;
 
             _mapHtmlLoaded = false;     // page is reloading; PushMarkersAsync will no-op until NavigationCompleted fires
+            _lastFittedJobId = null;    // fresh page resets the viewport, so allow the current job to fit again
             var apiKey = Environment.GetEnvironmentVariable("GOOGLE_MAPS_API_KEY") ?? "";
             MapWebView.NavigateToString(BuildMapHtml(apiKey));
         }
@@ -372,16 +422,24 @@ namespace DispatchTiger.Views
             if (staged != null)
             {
                 var status = staged.IsAvailable ? "available" : "unavailable";
-                MapTruckStatusText.Text = $"Staged: {staged.PlateNumber}  \u00b7  {status}  \u00b7  Switch to Day View to assign";
+                MapTruckStatusText.Text = $"Staged: {staged.PlateNumber}  \u00b7  {status}";
                 var colour = staged.IsAvailable
                     ? System.Windows.Media.Color.FromRgb(255, 215, 0)   // gold when available
                     : System.Windows.Media.Color.FromRgb(255, 140, 0);  // amber when unavailable
                 MapTruckStatusText.Foreground = new System.Windows.Media.SolidColorBrush(colour);
             }
+            else if (job != null && job.Status == DispatchStatus.Assigned
+                     && selected != null && selected.Id == job.Truck?.Id)
+            {
+                // Post-assignment: the selected truck is the one assigned to the selected job.
+                MapTruckStatusText.Text = $"Assigned: {selected.PlateNumber}  \u00b7  Undo available";
+                MapTruckStatusText.Foreground = new System.Windows.Media.SolidColorBrush(
+                    System.Windows.Media.Color.FromRgb(63, 185, 80));   // green — assigned
+            }
             else if (selected != null)
             {
                 var status = selected.IsAvailable ? "available" : "unavailable";
-                string suffix = job != null ? "  \u00b7  Select a candidate row to stage" : "  \u00b7  Select a job to stage for assignment";
+                string suffix = job != null ? "  \u00b7  Click a truck marker to stage it" : "  \u00b7  Pick a job first to stage a truck";
                 MapTruckStatusText.Text = $"Selected: {selected.PlateNumber}  \u00b7  {status}{suffix}";
                 MapTruckStatusText.Foreground = new System.Windows.Media.SolidColorBrush(
                     System.Windows.Media.Color.FromRgb(170, 170, 170));
@@ -416,39 +474,65 @@ namespace DispatchTiger.Views
 			{
 				await MapWebView.ExecuteScriptAsync(callJs);
 			}
-			catch
+			catch (Exception ex)
 			{
-				// WebView not ready or page navigating — silently ignore
+				System.Diagnostics.Debug.WriteLine($"[MapView] SetMarkers script failed (WebView navigating?): {ex.Message}");
 			}
 
 			// Update toolbar text (same as before, just no map reload)
 				var job = _vm.SelectedJob;
-				MapStatusText.Text = job != null
-					? $"Showing {_vm.AvailableTrucks.Count} trucks  \u00b7  Job: {job.Description}"
-					: $"Showing {_vm.AvailableTrucks.Count} trucks  \u00b7  Select a job to see pickup/delivery";
 
-				// Assign / Cancel Staging buttons:
+				if (job != null)
+				{
+					// A job is active — clear any lingering success banner from the previous assignment.
+					_mapSuccessMessage = null;
+					if (job.Status == DispatchStatus.Assigned)
+					{
+						// Post-assignment: job stays selected so the map keeps its context.
+						// Show a clear confirmation; the assigned truck marker is green.
+						string plate = job.Truck?.PlateNumber ?? _vm.SelectedTruck?.PlateNumber ?? "truck";
+						MapStatusText.Text = $"✓ Assigned {job.DisplayName} to {plate}. Undo available.";
+					}
+					else
+					{
+						MapStatusText.Text = _vm.StagedTruck != null
+							? $"Staged: {_vm.StagedTruck.PlateNumber} for {job.DisplayName}."
+							: $"Job selected: {job.DisplayName}. Click an available truck marker to stage it.";
+					}
+				}
+				else
+				{
+					// No active job — show the success banner if present, otherwise generic hint.
+					MapStatusText.Text = _mapSuccessMessage
+						?? "Select an unassigned job on the left to show it on the map.";
+				}
+
+				// Assignment confirmation panel:
 				// Visible only when a job is selected, a truck is staged, and the job is still unassigned.
 				bool showAssign = job != null
 					&& _vm.StagedTruck != null
 					&& job.Status == DispatchStatus.Unassigned;
 
-				var assignVis = showAssign ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
-				AssignStagedButton.Content     = showAssign ? $"✓  Assign {_vm.StagedTruck!.PlateNumber}" : "✓  Assign";
-				AssignStagedButton.Visibility  = assignVis;
-				CancelStagingButton.Visibility = assignVis;
+				if (showAssign)
+				{
+					string truckDisplay        = _vm.StagedTruck!.PlateNumber;
+					AssignmentPanelText.Text   = $"Assign {truckDisplay} to {job!.DisplayName}?";
+					AssignStagedButton.Content = $"✓ Assign {truckDisplay}";
+					AssignmentPanel.Visibility = System.Windows.Visibility.Visible;
+				}
+				else
+				{
+					AssignmentPanel.Visibility = System.Windows.Visibility.Collapsed;
+				}
 
 				if (job != null)
 				{
-					MapFitLegendText.Text = "Fit:  ★ Best  • Good  ▲ Risky  • Poor  • Blocked  — badge on each marker";
-						MapFitLegendText.Visibility = System.Windows.Visibility.Visible;
+					// Combined fit + route legend on a single line to reduce toolbar crowding.
+					MapFitLegendText.Text = "Fit: ★ Best • Good ▲ Risky • Poor • Blocked (badge per marker)   |   Route (straight line): ┄┄ truck → pickup  ── pickup → delivery";
+					MapFitLegendText.Visibility = System.Windows.Visibility.Visible;
 
-						// Route legend \u2014 straight-line preview only, not driving directions
-						MapRouteLegendText.Text = "Route preview (straight line):  ┄┄ truck → pickup  ── pickup → delivery";
-						MapRouteLegendText.Visibility = System.Windows.Visibility.Visible;
-
-					// Show manual recentre button so the dispatcher can fit back after panning
-					FitToJobButton.Visibility = System.Windows.Visibility.Visible;
+					// Show Zoom to Job button so the dispatcher can recentre after panning
+					ZoomToJobButton.Visibility = System.Windows.Visibility.Visible;
 
 					// Recommended truck line
 					var rec = PickRecommendedTruck(job, _vm.AvailableTrucks);
@@ -469,10 +553,9 @@ namespace DispatchTiger.Views
 				}
 				else
 				{
-					FitToJobButton.Visibility = System.Windows.Visibility.Collapsed;
-						MapFitLegendText.Visibility = System.Windows.Visibility.Collapsed;
-						MapRecommendedText.Visibility = System.Windows.Visibility.Collapsed;
-						MapRouteLegendText.Visibility = System.Windows.Visibility.Collapsed;
+					ZoomToJobButton.Visibility = System.Windows.Visibility.Collapsed;
+					MapFitLegendText.Visibility = System.Windows.Visibility.Collapsed;
+					MapRecommendedText.Visibility = System.Windows.Visibility.Collapsed;
 				}
 
 				UpdateTruckStatusText();
@@ -505,6 +588,15 @@ window.dispatchTigerMap        = null;
 window.dispatchTigerMarkerObjs = [];
 window.dispatchTigerRouteLines = [];   // Polyline objects for the current route preview
 window.dispatchTigerInfoWindow = null;
+
+// Open the shared InfoWindow on a marker (click only — no hover popup).
+window._dtOpenInfoWindow = function(marker, html) {{
+  window.dispatchTigerInfoWindow.setContent(html);
+  if (_dtUseAdvanced)
+    window.dispatchTigerInfoWindow.open({{ map:window.dispatchTigerMap, anchor:marker }});
+  else
+    window.dispatchTigerInfoWindow.open(window.dispatchTigerMap, marker);
+}};
 var _dtUseAdvanced = {dtUseAdv};
 
 async function initMap() {{
@@ -520,6 +612,9 @@ async function initMap() {{
 }}
 
 window.dispatchTigerClearMarkers = function() {{
+  if (window.dispatchTigerInfoWindow) {{
+	window.dispatchTigerInfoWindow.close();
+  }}
   window.dispatchTigerMarkerObjs.forEach(function(m) {{
 	if (m.setMap) m.setMap(null);
 	else if (typeof m.map !== 'undefined') m.map = null;
@@ -560,11 +655,14 @@ window.dispatchTigerSetMarkers = async function(jsonStr, routeJson, fitBounds) {
 		pin.textContent = m.label;
 	  }}
 	  var marker = new AdvancedMarkerElement({{ map:map, position:{{lat:m.lat,lng:m.lng}}, content:pin, title:m.label }});
-	  marker.addListener('click', function() {{
-		info.setContent('<div style=""font:13px sans-serif;white-space:pre-wrap;max-width:260px"">' + m.label.replace(/\n/g,'<br>') + '</div>');
-		info.open({{ anchor:marker, map }});
-		if (m.type==='truck' && window.chrome && chrome.webview) chrome.webview.postMessage({{type:'truckClicked',truckId:m.truckId}});
-	  }});
+	  (function(md, mkr) {{
+		mkr.addListener('click', function() {{
+		  var html = '<div style=\'font:13px sans-serif;white-space:pre-wrap;max-width:260px\'>' + md.label.replace(/\n/g,'<br>') + '</div>';
+		  window._dtOpenInfoWindow(mkr, html);
+		  if (md.type==='truck' && window.chrome && chrome.webview) chrome.webview.postMessage({{type:'truckClicked',truckId:md.truckId}});
+		}});
+	  }})(m, marker);
+
 	  window.dispatchTigerMarkerObjs.push(marker);
 	}});
   }} else {{
@@ -574,11 +672,14 @@ window.dispatchTigerSetMarkers = async function(jsonStr, routeJson, fitBounds) {
 		? {{ url:m.icon, scaledSize:new google.maps.Size(iw,ih), anchor:new google.maps.Point(iw/2,ih-4) }}
 		: {{ path:google.maps.SymbolPath.CIRCLE, scale:10, fillColor:m.color, fillOpacity:1, strokeColor:'#ffffff', strokeWeight:2 }};
 	  var marker = new google.maps.Marker({{ map:map, position:{{lat:m.lat,lng:m.lng}}, icon:icon, title:m.label }});
-	  marker.addListener('click', function() {{
-		info.setContent('<div style=""font:13px sans-serif;white-space:pre-wrap;max-width:260px;padding:4px"">' + m.label.replace(/\n/g,'<br>') + '</div>');
-		info.open(map, marker);
-		if (m.type==='truck' && window.chrome && chrome.webview) chrome.webview.postMessage({{type:'truckClicked',truckId:m.truckId}});
-	  }});
+	  (function(md, mkr) {{
+		mkr.addListener('click', function() {{
+		  var html = '<div style=\'font:13px sans-serif;white-space:pre-wrap;max-width:260px;padding:4px\'>' + md.label.replace(/\n/g,'<br>') + '</div>';
+		  window._dtOpenInfoWindow(mkr, html);
+		  if (md.type==='truck' && window.chrome && chrome.webview) chrome.webview.postMessage({{type:'truckClicked',truckId:md.truckId}});
+		}});
+	  }})(m, marker);
+
 	  window.dispatchTigerMarkerObjs.push(marker);
 	}});
   }}
@@ -586,6 +687,9 @@ window.dispatchTigerSetMarkers = async function(jsonStr, routeJson, fitBounds) {
   // Draw straight-line route preview polylines (no Directions API).
   // routeJson may be null (no job selected) or contain truckToPickup and/or pickupToDelivery legs.
   var routeBoundsPoints = [];
+  // jobBoundsPoints holds ONLY the job's pickup + delivery so auto-fit frames the same
+  // area as the explicit Zoom to Job button (truck positions never pull the viewport away).
+  var jobBoundsPoints = [];
   if (routeJson) {{
 	var route; try {{ route = JSON.parse(routeJson); }} catch(e) {{ route = null; }}
 	if (route) {{
@@ -609,6 +713,7 @@ window.dispatchTigerSetMarkers = async function(jsonStr, routeJson, fitBounds) {
 		window.dispatchTigerRouteLines.push(dashedLine);
 		routeBoundsPoints.push({{lat:leg.fromLat,lng:leg.fromLng}});
 		routeBoundsPoints.push({{lat:leg.toLat,  lng:leg.toLng  }});
+		jobBoundsPoints.push({{lat:leg.toLat,   lng:leg.toLng   }}); // leg.to = pickup
 	  }}
 	  // Solid teal line: pickup → delivery (loaded leg)
 	  if (route.pickupToDelivery) {{
@@ -623,22 +728,44 @@ window.dispatchTigerSetMarkers = async function(jsonStr, routeJson, fitBounds) {
 		window.dispatchTigerRouteLines.push(solidLine);
 		routeBoundsPoints.push({{lat:leg2.fromLat,lng:leg2.fromLng}});
 		routeBoundsPoints.push({{lat:leg2.toLat,  lng:leg2.toLng  }});
+		jobBoundsPoints.push({{lat:leg2.fromLat, lng:leg2.fromLng }}); // pickup
+		jobBoundsPoints.push({{lat:leg2.toLat,   lng:leg2.toLng   }}); // delivery
 	  }}
 	}}
   }}
 
   if (fitBounds) {{
-	// Build bounds from markers + route endpoints so manual Fit to Job includes route.
-	var allPoints = markers.map(function(m){{return {{lat:m.lat,lng:m.lng}};}})
-						   .concat(routeBoundsPoints);
-	if (allPoints.length === 1) {{
-	  map.setCenter(allPoints[0]); map.setZoom(12);
-	}} else {{
+	// Auto-fit on job select: frame ONLY the job pickup/delivery (same as Zoom to Job).
+	// Truck fleet positions are intentionally excluded so a faraway truck cannot push the job out of view.
+	var fitPts = jobBoundsPoints.length > 0 ? jobBoundsPoints : routeBoundsPoints;
+	if (fitPts.length === 1) {{
+	  map.setCenter(fitPts[0]); map.setZoom(12);
+	}} else if (fitPts.length > 1) {{
 	  var b = new google.maps.LatLngBounds();
-	  allPoints.forEach(function(p){{ b.extend(p); }});
-	  map.fitBounds(b, 60);
+	  fitPts.forEach(function(p){{ b.extend(p); }});
+	  map.fitBounds(b, {{top:80,right:80,bottom:80,left:80}});
 	}}
   }}
+}};
+
+// Zoom the map to show only the selected job’s pickup and delivery.
+// jobBoundsJson : JSON array of {{lat,lng}} objects — pickup + delivery only.
+// If the points are identical or too close, falls back to a reasonable zoom.
+window.dispatchTigerZoomToJob = function(jobBoundsJson) {{
+  if (!window.dispatchTigerMap) return;
+  var pts; try {{ pts = JSON.parse(jobBoundsJson); }} catch(e) {{ return; }}
+  if (!pts || pts.length === 0) return;
+  if (pts.length === 1) {{
+	window.dispatchTigerMap.setCenter(pts[0]); window.dispatchTigerMap.setZoom(13); return;
+  }}
+  var bounds = new google.maps.LatLngBounds();
+  pts.forEach(function(p) {{ bounds.extend(new google.maps.LatLng(p.lat, p.lng)); }});
+  // Guard against near-identical coords (< ~0.002 deg apart ≈ 200 m)
+  var ne = bounds.getNorthEast(), sw = bounds.getSouthWest();
+  if (Math.abs(ne.lat() - sw.lat()) < 0.002 && Math.abs(ne.lng() - sw.lng()) < 0.002) {{
+	window.dispatchTigerMap.setCenter(bounds.getCenter()); window.dispatchTigerMap.setZoom(14); return;
+  }}
+  window.dispatchTigerMap.fitBounds(bounds, {{top:80,right:80,bottom:80,left:80}});
 }};
 </script>
 <script src='https://maps.googleapis.com/maps/api/js?key={apiKey}&v=weekly{librariesParam}&callback=initMap' async defer></script>
@@ -688,6 +815,14 @@ window.dispatchTigerSetMarkers = async function(jsonStr, routeJson, fitBounds) {
 			int selectedTruckId = vm.SelectedTruck?.Id ?? -1;
 			var fitJob          = vm.SelectedJob;
 
+			// Truck assigned to the currently selected job, when that job is already
+			// assigned (post-assignment Map View context). Rendered green so the
+			// dispatcher can see which truck just took the selected job.
+			int assignedSelectedTruckId =
+				fitJob != null && fitJob.Status == DispatchStatus.Assigned
+					? fitJob.Truck?.Id ?? -1
+					: -1;
+
 			// Determine recommended truck once (only when a job is selected)
 			int recommendedTruckId = fitJob != null
 				? PickRecommendedTruck(fitJob, vm.AvailableTrucks)?.Id ?? -1
@@ -726,14 +861,15 @@ window.dispatchTigerSetMarkers = async function(jsonStr, routeJson, fitBounds) {
 						fitReason = BuildFitReason(tLabel, tDetail, rDetail);
 					}
 
-					string color = truck.Id == stagedTruckId   ? "#FFD700"
-								 : truck.Id == selectedTruckId ? "#FFD700"
-								 : truck.IsAvailable           ? "#5B9BD5"
-								 :                               "#888888";
+					string color = truck.Id == stagedTruckId           ? "#FFD700"   // gold   — staged for assignment
+								 : truck.Id == assignedSelectedTruckId ? "#3FB950"   // green  — assigned to the selected job
+								 : truck.Id == selectedTruckId         ? "#7EC4CF"   // cyan   — selected, not staged
+								 : truck.IsAvailable                   ? "#5B9BD5"   // blue   — available
+								 :                                       "#888888";  // gray   — unavailable
 
 					bool isRecommended = truck.Id == recommendedTruckId;
 
-					string label   = EscapeJs(BuildTruckLabel(truck, fitLabel, fitReason));
+					string label   = EscapeJs(BuildTruckLabel(truck, fitLabel, fitReason, fitJob));
 					string iconUrl = GetVehicleMarkerSvg(truck, color, isRecommended);
 
 					// Recommended markers use a 56×40 SVG; pass icon dimensions so the
@@ -743,11 +879,7 @@ window.dispatchTigerSetMarkers = async function(jsonStr, routeJson, fitBounds) {
 
 					if (!first) sb.Append(',');
 					first = false;
-					sb.Append($"{{\"lat\":{lat:F6},\"lng\":{lng:F6}," +
-							  $"\"label\":\"{label}\",\"color\":\"{color}\"," +
-							  $"\"icon\":\"{iconUrl}\"," +
-							  $"\"iconW\":{iconW},\"iconH\":{iconH}," +
-							  $"\"type\":\"truck\",\"truckId\":{truck.Id}}}");
+					sb.Append($"{{\"lat\":{lat:F6},\"lng\":{lng:F6},\"label\":\"{label}\",\"color\":\"{color}\",\"icon\":\"{iconUrl}\",\"iconW\":{iconW},\"iconH\":{iconH},\"type\":\"truck\",\"truckId\":{truck.Id}}}");
 				}
 			}
 
@@ -808,8 +940,13 @@ window.dispatchTigerSetMarkers = async function(jsonStr, routeJson, fitBounds) {
 							 ?? TryGetZoneCoordinate(job.DeliveryLocation?.Address)
 							 ?? TryGetZoneCoordinate(job.DeliveryAddress);
 
-			// Resolve which truck to draw the deadhead leg from
-			Truck? routeTruck  = vm.StagedTruck ?? PickRecommendedTruck(job, vm.AvailableTrucks);
+			// Resolve which truck to draw the deadhead leg from:
+			//   • job already assigned  → the assigned truck (post-assignment Map View context)
+			//   • truck staged          → the staged truck
+			//   • otherwise             → the recommended truck (planning preview)
+			Truck? routeTruck = job.Status == DispatchStatus.Assigned
+				? job.Truck ?? vm.StagedTruck ?? PickRecommendedTruck(job, vm.AvailableTrucks)
+				: vm.StagedTruck ?? PickRecommendedTruck(job, vm.AvailableTrucks);
 			bool   isStaged    = vm.StagedTruck != null;
 			var    truckCoord  = routeTruck != null ? TryGetZoneCoordinate(routeTruck.CurrentLocation) : null;
 
@@ -979,23 +1116,23 @@ window.dispatchTigerSetMarkers = async function(jsonStr, routeJson, fitBounds) {
 
         // ── Label builders ────────────────────────────────────────────────────────
 
-        private static string BuildTruckLabel(Truck truck, string fitLabel = "", string fitReason = "")
+        private static string BuildTruckLabel(Truck truck, string fitLabel = "", string fitReason = "", Job? selectedJob = null)
         {
             var sb = new StringBuilder();
             sb.Append("🚛 ").Append(truck.PlateNumber);
-            if (!string.IsNullOrWhiteSpace(truck.VehicleType))
-                sb.Append('\n').Append(truck.VehicleType);
-            if (truck.Driver != null)
-                sb.Append('\n').Append(truck.Driver.Name);
+            if (!string.IsNullOrWhiteSpace(truck.VehicleType)) sb.Append('\n').Append(truck.VehicleType);
+            if (truck.Driver != null) sb.Append('\n').Append(truck.Driver.Name);
             sb.Append('\n').Append(truck.IsAvailable ? "Available" : "Unavailable");
-            if (truck.AvailableAt.HasValue)
-                sb.Append(" from ").Append(truck.AvailableAt.Value.ToString("h:mm tt"));
-            if (!string.IsNullOrWhiteSpace(fitLabel))
+            if (truck.AvailableAt.HasValue) sb.Append(" from ").Append(truck.AvailableAt.Value.ToString("h:mm tt"));
+            if (truck.Capacity.HasValue || truck.CapacityUnits.HasValue)
             {
-                sb.Append("\nFit: ").Append(fitLabel);
-                if (!string.IsNullOrWhiteSpace(fitReason))
-                    sb.Append("\nWhy: ").Append(fitReason);
+                sb.Append("\nCap:");
+                if (truck.Capacity.HasValue) sb.Append($" {truck.Capacity.Value:N0} kg");
+                if (truck.CapacityUnits.HasValue) sb.Append($" / {truck.CapacityUnits.Value} units");
             }
+            if (!string.IsNullOrWhiteSpace(fitLabel))
+            { sb.Append("\nFit: ").Append(fitLabel);
+              if (!string.IsNullOrWhiteSpace(fitReason)) sb.Append("\nWhy: ").Append(fitReason); }
             return sb.ToString();
         }
 
