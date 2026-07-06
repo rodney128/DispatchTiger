@@ -399,7 +399,7 @@ namespace DispatchTiger.Views
             // -- Job summary line --
             CandidateJobSummaryPanel.Children.Clear();
 
-            AddSummaryRun(CandidateJobSummaryPanel, "Truck candidates for: ", Color.FromRgb(136, 136, 136));
+            AddSummaryRun(CandidateJobSummaryPanel, "Trucks for this job: ", Color.FromRgb(136, 136, 136));
             AddSummaryRun(CandidateJobSummaryPanel, job.DisplayName, Color.FromRgb(242, 140, 40), bold: true);
 
             // Show raw address only when no location is linked (mirrors job-card fallback)

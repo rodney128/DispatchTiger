@@ -18,7 +18,7 @@ namespace DispatchTiger.Views
         private MainViewModel? _vm;
         private bool _webViewReady;
         private bool _mapHtmlLoaded;                                    // true once NavigationCompleted fires successfully
-        private int? _lastFittedJobId;                                  // id of the last job we called fitBounds for; prevents refitting the same job
+        private int? _lastAutoFitJobId;                                 // id of the last job auto-fit framed on selection; prevents re-framing the same job
         private System.Threading.CancellationTokenSource? _markerDebounce; // collapses rapid PropertyChanged firings
         private string? _mapSuccessMessage;                             // set after assignment; shown in toolbar until next job is selected
 
@@ -316,7 +316,7 @@ namespace DispatchTiger.Views
                 else
                 {
                     // No job selected - selection only, no staging
-                    _vm.StatusMessage = $"Selected {truck.DisplayName}. Pick a job first, then click a truck to stage it.";
+                    _vm.StatusMessage = $"Selected {truck.DisplayName} from map. Select an unassigned job first.";
                 }
 
                 // Toolbar truck status line
@@ -354,18 +354,19 @@ namespace DispatchTiger.Views
             }
 
             // Viewport rules:
-            //   SelectedJob  → different job : fitBounds = true  (fit once to pickup/delivery/trucks)
+            //   SelectedJob  → different job : fitBounds = true  (auto-fit once to the selected job's
+            //                                  pickup + delivery only — no fleet truck markers)
             //   SelectedJob  → same job again : fitBounds = false (suppress re-binding noise)
             //   SelectedTruck / StagedTruck   : fitBounds = false (marker colour update only)
             bool fitBounds = false;
             if (e.PropertyName == nameof(MainViewModel.SelectedJob))
             {
                 int? newJobId = _vm?.SelectedJob?.Id;
-                // Only fit when the job truly changed (null→job, job→null, job→differentJob).
-                if (newJobId != _lastFittedJobId)
+                // Only auto-fit when the job truly changed (null→job, job→null, job→differentJob).
+                if (newJobId != _lastAutoFitJobId)
                 {
                     fitBounds = true;
-                    _lastFittedJobId = newJobId;    // record now so a superseded debounce tick can't re-trigger
+                    _lastAutoFitJobId = newJobId;    // record now so a superseded debounce tick can't re-trigger
                 }
                 // Same job re-selected — keep the current center/zoom.
             }
@@ -408,7 +409,7 @@ namespace DispatchTiger.Views
                 return;
 
             _mapHtmlLoaded = false;     // page is reloading; PushMarkersAsync will no-op until NavigationCompleted fires
-            _lastFittedJobId = null;    // fresh page resets the viewport, so allow the current job to fit again
+            _lastAutoFitJobId = null;   // fresh page resets the viewport, so allow the current job to auto-fit again
             var apiKey = Environment.GetEnvironmentVariable("GOOGLE_MAPS_API_KEY") ?? "";
             MapWebView.NavigateToString(BuildMapHtml(apiKey));
         }
@@ -439,7 +440,7 @@ namespace DispatchTiger.Views
             else if (selected != null)
             {
                 var status = selected.IsAvailable ? "available" : "unavailable";
-                string suffix = job != null ? "  \u00b7  Click a truck marker to stage it" : "  \u00b7  Pick a job first to stage a truck";
+                string suffix = job != null ? "  \u00b7  Click a truck marker to stage it" : "  \u00b7  Select an unassigned job first";
                 MapTruckStatusText.Text = $"Selected: {selected.PlateNumber}  \u00b7  {status}{suffix}";
                 MapTruckStatusText.Foreground = new System.Windows.Media.SolidColorBrush(
                     System.Windows.Media.Color.FromRgb(170, 170, 170));
@@ -630,7 +631,8 @@ window.dispatchTigerClearRouteLines = function() {{
 
 // jsonStr    : JSON array of marker objects (unchanged from before)
 // routeJson  : JSON object with optional truckToPickup / pickupToDelivery legs, or null
-// fitBounds  : boolean — whether to fit the viewport to all visible points
+// fitBounds  : boolean — when true, auto-fit the viewport to the selected job's
+//              pickup + delivery only (no fleet truck markers)
 window.dispatchTigerSetMarkers = async function(jsonStr, routeJson, fitBounds) {{
   if (!window.dispatchTigerMap) return;
   window.dispatchTigerClearMarkers();

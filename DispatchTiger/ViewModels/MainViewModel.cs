@@ -43,9 +43,15 @@ namespace DispatchTiger.ViewModels
             get => _selectedJob;
             set
             {
+                // No-op when the same job object is re-selected: do NOT raise
+                // PropertyChanged and do NOT clear staging (a staged truck must survive
+                // re-selecting the same job, e.g. post-assignment re-selection).
+                if (ReferenceEquals(_selectedJob, value))
+                    return;
+
                 _selectedJob = value;
                 OnPropertyChanged();
-                // Clear staged truck when the dispatcher moves to a new job
+                // Clear staged truck only when the dispatcher actually moves to a new job.
                 StagedTruck = null;
             }
         }
@@ -53,27 +59,51 @@ namespace DispatchTiger.ViewModels
         public Truck? SelectedTruck
         {
             get => _selectedTruck;
-            set { _selectedTruck = value; OnPropertyChanged(); }
+            set
+            {
+                if (ReferenceEquals(_selectedTruck, value))
+                    return;
+                _selectedTruck = value;
+                OnPropertyChanged();
+            }
         }
 
         /// <summary>The truck staged for assignment to SelectedJob. Not yet assigned.</summary>
         public Truck? StagedTruck
         {
             get => _stagedTruck;
-            set { _stagedTruck = value; OnPropertyChanged(); }
+            set
+            {
+                if (ReferenceEquals(_stagedTruck, value))
+                    return;
+                _stagedTruck = value;
+                OnPropertyChanged();
+            }
         }
 
         public string CurrentView
         {
             get => _currentView;
-            set { _currentView = value; OnPropertyChanged(); }
+            set
+            {
+                if (string.Equals(_currentView, value, StringComparison.Ordinal))
+                    return;
+                _currentView = value;
+                OnPropertyChanged();
+            }
         }
 
         /// <summary>Short status message shown in the footer after key dispatcher actions.</summary>
         public string StatusMessage
         {
             get => _statusMessage;
-            set { _statusMessage = value; OnPropertyChanged(); }
+            set
+            {
+                if (string.Equals(_statusMessage, value, StringComparison.Ordinal))
+                    return;
+                _statusMessage = value;
+                OnPropertyChanged();
+            }
         }
 
         /// <summary>True when a manual assignment can be undone.</summary>
